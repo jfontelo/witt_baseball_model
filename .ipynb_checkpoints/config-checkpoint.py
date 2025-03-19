@@ -1,12 +1,12 @@
 ### config.py - Load Database Credentials Securely
-import os
 from dotenv import load_dotenv
+import os
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get database connection URL from environment variable
+# Retrieve database URL
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL is None:
-    raise ValueError("❌ DATABASE_URL environment variable not set!")
+    raise ValueError("DATABASE_URL not found. Make sure .env is correctly set up.")

@@ -1,7 +1,7 @@
 =======
 # Bobby Witt Jr Baseball Model 
 
-This project is an exercise in data engineering and predictive analytics, building a predictive model for **Total Bases (TB) and Stolen Bases (SB)** for **Bobby Witt of the Kansas City Royals** to identify valuable betting opportunities.
+This project is an exercise in data engineering and predictive analytics, building a predictive model for **Total Bases (TB) and Stolen Bases (SB)** for **Bobby Witt of the Kansas City Royals**.
 
 ## 📂 Project Structure
 

@@ -22,6 +22,20 @@ except ModuleNotFoundError:
     subprocess.run(["pip", "install", "MLB-StatsAPI"], check=True)
     import statsapi
 
+try:
+    import sqlalchemy
+except ModuleNotFoundError:
+    print("⚠️ sqlalchemy not found. Installing...")
+    subprocess.run(["pip", "install", "sqlalchemy"], check=True)
+    import sqlalchemy
+
+try:
+    import psycopg2
+except ModuleNotFoundError:
+    print("⚠️ psycopg2 not found. Installing...")
+    subprocess.run(["pip", "install", "psycopg2-binary"], check=True)
+    import psycopg2  # Re-import after installation
+
 from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, text
 from sqlalchemy.dialects.postgresql import insert
 from config import DATABASE_URL
@@ -102,6 +116,7 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS royals_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
+            team TEXT NOT NULL,  -- Ensuring team column is added dynamically
             opponent TEXT,
             home_away TEXT,
             ab INTEGER,
@@ -113,7 +128,7 @@ def create_tables():
             so INTEGER,
             rbi INTEGER,
             ops TEXT,
-            UNIQUE (game_id, opponent)
+            UNIQUE (game_id, team)
         );
         """),
         text("""
@@ -219,11 +234,15 @@ def fetch_royals_game_logs(team_id, seasons):
         if "stats" not in data or not data["stats"]:
             print(f"⚠️ No game logs available for Royals in {season}. Skipping.")
             continue
-
+        
+        # Extract the team name once from the API response (assuming it's under "team" at the top level)
+        team_name = data.get("team", {}).get("name", "Kansas City Royals")  # Default to KCR if missing
+        
         for game in data["stats"][0]["splits"]:
             royals_game_logs.append({
                 "game_id": game["game"].get("gamePk", None),
                 "date": game["game"].get("officialDate", game["game"].get("date", None)),  # Extracts official date
+                "team": team_name,  # Uses extracted team name dynamically
                 "opponent": game.get("opponent", {}).get("name", None),  # Extract opponent team name
                 "home_away": "Home" if game.get("isHome", False) else "Away",
                 "ab": game["stat"].get("atBats", 0),
@@ -261,36 +280,24 @@ df_royals_game_logs.columns = df_royals_game_logs.columns.str.lower().str.strip(
 print("Columns in df_witt_game_logs (before upsert):", list(df_witt_game_logs.columns))
 print("Columns in df_royals_game_logs (before upsert):", list(df_royals_game_logs.columns))
 
+# Fetch PostgreSQL table schema for comparison
 with engine.connect() as conn:
-    result = conn.execute(text(
-        "SELECT TRIM(lower(column_name)) FROM information_schema.columns WHERE table_name = 'witt_game_logs'"))
-    print("Columns in PostgreSQL witt_game_logs (lowercased, stripped):", [row[0] for row in result])
+    witt_result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'"))
+    royals_result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'royals_game_logs'"))
 
-#  Debug: Check for whitepace issues
-print("Stripped Columns in df_witt_game_logs:", [col.strip() for col in df_witt_game_logs.columns])
+    witt_columns = [row[0] for row in witt_result]
+    royals_columns = [row[0] for row in royals_result]
 
-# Convert Pandas DataFrame column types to match PostgreSQL:
-df_witt_game_logs = df_witt_game_logs.astype({
-    "game_id": "int",
-    "ab": "Int64",
-    "h": "Int64",
-    "tb": "Int64",
-    "sb": "Int64",
-    "cs": "Int64",
-    "bb": "Int64",
-    "so": "Int64",
-    "rbi": "Int64",
-    "ops": "string"
-})
+    print("Columns in PostgreSQL witt_game_logs:", witt_columns)
+    print("Columns in PostgreSQL royals_game_logs:", royals_columns)
 
-# Debug data types
-print("Data types in df_witt_game_logs:\n", df_witt_game_logs.dtypes)
+# Ensure "team" exists in royals_game_logs to avoid KeyError
+if "team" not in df_royals_game_logs.columns:
+    df_royals_game_logs["team"] = "Kansas City Royals"
 
-# Force column order before upsert
-expected_columns = ["game_id", "date", "team", "opponent", "home_away", "ab", "h", "tb", "sb", "cs", "bb", "so", "rbi", "ops"]
-
-df_witt_game_logs = df_witt_game_logs[expected_columns]
-df_royals_game_logs = df_royals_game_logs[expected_columns]
+# Ensure DataFrame contains only columns that exist in PostgreSQL, filling missing ones with None
+df_witt_game_logs = df_witt_game_logs.reindex(columns=witt_columns, fill_value=None)
+df_royals_game_logs = df_royals_game_logs.reindex(columns=royals_columns, fill_value=None)
 
 # Upsert each DataFrame into PostgreSQL
 if not df_witt_game_logs.empty:
