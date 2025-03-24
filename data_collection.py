@@ -13,7 +13,7 @@ try:
 except ModuleNotFoundError:
     print("⚠️ pandas not found. Installing...")
     subprocess.run(["pip", "install", "pandas"], check=True)
-    import pandas as pd  # Import again after installation
+    import pandas as pd  # Import again after installation 
 
 try:
     import statsapi
@@ -100,14 +100,14 @@ def create_tables():
             team TEXT NOT NULL,
             opponent TEXT,
             home_away TEXT,
-            ab INTEGER,
-            h INTEGER,
-            tb INTEGER,
-            sb INTEGER,
-            cs INTEGER,
-            bb INTEGER,
-            so INTEGER,
-            rbi INTEGER,
+            ab SMALLINT,
+            h SMALLINT,
+            tb SMALLINT,
+            sb SMALLINT,
+            cs SMALLINT,
+            bb SMALLINT,
+            so SMALLINT,
+            rbi SMALLINT,
             ops TEXT,
             UNIQUE (game_id, team)
         );
@@ -213,7 +213,7 @@ def fetch_witt_game_logs(player_id, seasons):
             })
 
     return pd.DataFrame(witt_game_logs)
-
+    
 # Fetch Royals historical game logs
 def fetch_royals_game_logs(team_id, seasons):
     """
@@ -307,7 +307,7 @@ if not df_witt_game_logs.empty:
 
 if not df_royals_game_logs.empty:
     print("🤓 Columns in df_royals_game_logs (before upsert):", df_royals_game_logs.columns)
-    upsert_table(df_royals_game_logs, "royals_game_logs", ["game_id"])
+    upsert_table(df_royals_game_logs, "royals_game_logs", ["game_id", "team"])
     print("✅ `royals_game_logs` upserted successfully!")
 
 # BECAUSE THE OPPONENT LOGS WERE USING THE ROYALS_GAME_LOGS OPPONENTS & GAME_ID, WE'LL HAVE TO RUN THIS MODULE BELOW
