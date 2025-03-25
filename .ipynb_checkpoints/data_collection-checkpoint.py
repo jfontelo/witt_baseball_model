@@ -117,7 +117,9 @@ def create_tables():
             game_id INTEGER NOT NULL,
             date DATE,
             team TEXT NOT NULL,  -- Ensuring team column is added dynamically
+            season INTEGER,
             opponent TEXT,
+            opponent_id INTEGER,
             home_away TEXT,
             ab INTEGER,
             h INTEGER,
@@ -128,6 +130,8 @@ def create_tables():
             so INTEGER,
             rbi INTEGER,
             ops TEXT,
+            runs INTEGER,
+            won BOOLEAN,
             UNIQUE (game_id, team)
         );
         """),
@@ -135,7 +139,8 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS opponent_offense_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
-            team TEXT NOT NULL,
+            opponent TEXT NOT NULL,
+            opponent_id INTEGER,
             season INTEGER,
             home_away TEXT,
             ab INTEGER,
@@ -147,14 +152,15 @@ def create_tables():
             so INTEGER,
             rbi INTEGER,
             ops TEXT,
-            UNIQUE (game_id, team)
+            UNIQUE (game_id, opponent)
         );
         """),
         text("""
         CREATE TABLE IF NOT EXISTS opponent_defense_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
-            team TEXT NOT NULL,
+            opponent TEXT NOT NULL,
+            opponent_id INTEGER,
             season INTEGER,
             home_away TEXT,
             era FLOAT,
@@ -163,7 +169,7 @@ def create_tables():
             opponent_slg FLOAT,
             cs_percentage FLOAT,
             errors INTEGER,
-            UNIQUE (game_id, team)
+            UNIQUE (game_id, opponent)
         );
         """)
     ]
@@ -217,7 +223,8 @@ def fetch_witt_game_logs(player_id, seasons):
 # Fetch Royals historical game logs
 def fetch_royals_game_logs(team_id, seasons):
     """
-    Fetch per-game offensive stats for the Kansas City Royals from the MLB API.
+    Fetch per-game offensive stats for the Kansas City Royals from the MLB API,
+    including opponent ID, runs scored, and win/loss indicator.
     """
     royals_game_logs = []
 
@@ -239,11 +246,18 @@ def fetch_royals_game_logs(team_id, seasons):
         team_name = data.get("team", {}).get("name", "Kansas City Royals")  # Default to KCR if missing
         
         for game in data["stats"][0]["splits"]:
+            # Opponent info
+            opponent_info = game.get("opponent", {})
+            opponent_id = opponent_info.get("id", None)
+            opponent_name = opponent_info.get("name", None)
+
             royals_game_logs.append({
                 "game_id": game["game"].get("gamePk", None),
-                "date": game["game"].get("officialDate", game["game"].get("date", None)),  # Extracts official date
-                "team": team_name,  # Uses extracted team name dynamically
-                "opponent": game.get("opponent", {}).get("name", None),  # Extract opponent team name
+                "date": game["game"].get("officialDate", game["game"].get("date", None)),
+                "team": team_name,  
+                "season": game.get("season", None),
+                "opponent": opponent_name,
+                "opponent_id": opponent_id,
                 "home_away": "Home" if game.get("isHome", False) else "Away",
                 "ab": game["stat"].get("atBats", 0),
                 "h": game["stat"].get("hits", 0),
@@ -254,6 +268,8 @@ def fetch_royals_game_logs(team_id, seasons):
                 "so": game["stat"].get("strikeOuts", 0),
                 "rbi": game["stat"].get("rbi", 0),
                 "ops": game["stat"].get("ops", None),
+                "runs": game["stat"].get("runs", 0),     # how many runs the Royals scored
+                "won": game.get("isWin", False),         # whether the Royals won this game
             })
 
     return pd.DataFrame(royals_game_logs)
@@ -307,47 +323,62 @@ if not df_witt_game_logs.empty:
 
 if not df_royals_game_logs.empty:
     print("🤓 Columns in df_royals_game_logs (before upsert):", df_royals_game_logs.columns)
+    print("DEBUG: Max game_id:", df_royals_game_logs["game_id"].max()) # Printing max values, suspected exeeding limit 
+    print("DEBUG: Max opponent_id:", df_royals_game_logs["opponent_id"].max()) # Printing max values, suspected exeeding limit limit 
+    print("DEBUG: Max ab:", df_royals_game_logs["ab"].max()) # Printing max values, suspected exeeding limit 
     upsert_table(df_royals_game_logs, "royals_game_logs", ["game_id", "team"])
     print("✅ `royals_game_logs` upserted successfully!")
 
-# BECAUSE THE OPPONENT LOGS WERE USING THE ROYALS_GAME_LOGS OPPONENTS & GAME_ID, WE'LL HAVE TO RUN THIS MODULE BELOW
+# BECAUSE THE OPPONENT LOGS WERE USING THE ROYALS_GAME_LOGS OPPONENT_ID & GAME_ID, WE'LL HAVE TO RUN THIS MODULE BELOW
 
 # Fetch opponent historical offensive game logs
 def fetch_opponent_offense_game_logs(seasons):
     """
     Fetches per-game offensive stats for opponents that faced the Royals.
+    This version uses the numeric opponent ID (from the 'opponent_id' column) along with the opponent name.
     """
     opponent_offense_game_logs = []
 
     for season in seasons:
-        # Ensure the season parameter is correctly passed as a tuple
-        query = "SELECT DISTINCT opponent, game_id FROM royals_game_logs WHERE season = %s;"
-        opponent_teams = pd.read_sql(query, con=engine, params=[season])  # Fixed: season passed correctly
-
+        print("DEBUG: season =", season, "type =", type(season))
+        
+        query = """
+            SELECT DISTINCT opponent, opponent_id, game_id
+            FROM royals_game_logs
+            WHERE season = %s;
+        """
+        opponent_teams = pd.read_sql(query, con=engine, params=(season,))  # Using a single-element tuple
+        
         for _, row in opponent_teams.iterrows():
             team_name = row["opponent"]
+            opponent_id = row["opponent_id"]
             game_id = row["game_id"]
 
             try:
-                url = f"https://statsapi.mlb.com/api/v1/teams/stats?team={team_name}&group=hitting&stats=gameLog&season={season}"
+                # Use the numeric opponent ID in the API call
+                url = (
+                    f"https://statsapi.mlb.com/api/v1/teams/stats?"
+                    f"team={opponent_id}&group=hitting&stats=gameLog&season={season}"
+                )
                 response = requests.get(url)
                 response.raise_for_status()
                 data = response.json()
             except requests.exceptions.RequestException as e:
-                print(f"⚠️ API request failed for {team_name} offense logs in {season}: {e}")
+                print(f"⚠️ API request failed for {team_name} (ID {opponent_id}) offense logs in {season}: {e}")
                 continue
 
             if "stats" not in data or not data["stats"]:
-                print(f"⚠️ No offensive stats for {team_name} in {season}. Skipping.")
+                print(f"⚠️ No offensive stats for {team_name} (ID {opponent_id}) in {season}. Skipping.")
                 continue
 
             for game in data["stats"][0]["splits"]:
-                opponent_offense_game_logs.append({
+                row_dict = {
                     "game_id": game["game"].get("gamePk", None),
-                    "date": game["game"].get("officialDate", game["game"].get("date", None)),  # Ensures correct date extraction
-                    "team": team_name,  # Extracts team name instead of ID
-                    "season": season,
-                    "home_away": "Home" if game.get("isHome", False) else "Away",  # Fixes Home/Away detection
+                    "date": game["game"].get("officialDate", game["game"].get("date", None)),
+                    "opponent": team_name,       # Opponent's name
+                    "opponent_id": opponent_id,  # Opponent's numeric ID
+                    "season": game.get("season", None),
+                    "home_away": "Home" if game.get("isHome", False) else "Away",
                     "ab": game["stat"].get("atBats", 0),
                     "h": game["stat"].get("hits", 0),
                     "tb": game["stat"].get("totalBases", 0),
@@ -357,56 +388,71 @@ def fetch_opponent_offense_game_logs(seasons):
                     "so": game["stat"].get("strikeOuts", 0),
                     "rbi": game["stat"].get("rbi", 0),
                     "ops": game["stat"].get("ops", None),
-                })
-
+                }
+                # print("DEBUG Opponent offense row:", row_dict)
+                opponent_offense_game_logs.append(row_dict)
+                
     return pd.DataFrame(opponent_offense_game_logs)
     
 # Fetch opponent historical defensive game logs
 def fetch_opponent_defense_game_logs(seasons):
     """
     Fetches per-game defensive stats for opponents that faced the Royals.
+    This version uses the numeric opponent ID (from the 'opponent_id' column) along with the opponent name.
     """
     opponent_defense_game_logs = []
 
     for season in seasons:
-        query = "SELECT DISTINCT opponent, game_id FROM royals_game_logs WHERE season = %s;"
-        opponent_teams = pd.read_sql(query, con=engine, params=(season,))  # Ensure tuple format
-
+        print("DEBUG: season =", season, "type =", type(season))
+        
+        # Query to retrieve distinct opponent, opponent_id, and game_id for the season.
+        query = """
+            SELECT DISTINCT opponent, opponent_id, game_id
+            FROM royals_game_logs
+            WHERE season = %s;
+        """
+        opponent_teams = pd.read_sql(query, con=engine, params=(season,))  # Using a single-element tuple
+        
         for _, row in opponent_teams.iterrows():
             team_name = row["opponent"]
+            opponent_id = row["opponent_id"]
             game_id = row["game_id"]
 
             try:
-                # API Call for opponent's defensive game log stats
-                url = f"https://statsapi.mlb.com/api/v1/teams/stats?team={team_name}&group=pitching,fielding&stats=gameLog&season={season}"
+                # Use the numeric opponent ID in the API call
+                url = (
+                    f"https://statsapi.mlb.com/api/v1/teams/stats?"
+                    f"team={opponent_id}&group=pitching,fielding&stats=gameLog&season={season}"
+                )
                 response = requests.get(url)
                 response.raise_for_status()
                 data = response.json()
             except requests.exceptions.RequestException as e:
-                print(f"⚠️ API request failed for {team_name} defense logs in {season}: {e}")
+                print(f"⚠️ API request failed for {team_name} (ID {opponent_id}) defense logs in {season}: {e}")
                 continue
 
             if "stats" not in data or not data["stats"]:
-                print(f"⚠️ No defensive stats for {team_name} in {season}. Skipping.")
+                print(f"⚠️ No defensive stats for {team_name} (ID {opponent_id}) in {season}. Skipping.")
                 continue
 
             for game in data["stats"][0]["splits"]:
-                opponent_defense_game_logs.append({
+                row_dict = {
                     "game_id": game["game"].get("gamePk", None),
-                    "date": game["game"].get("officialDate", game["game"].get("date", None)),  # Ensures correct date extraction
-                    "team": team_name,
-                    "season": season,
-                    "home_away": "away" if game.get("isHome", False) else "home",  # Prevents KeyError
-                    "era": game["stat"].get("earnedRunAverage", None),
-                    "whip": game["stat"].get("whip", None),
-                    "opponent_obp": game["stat"].get("obp", None),
-                    "opponent_slg": game["stat"].get("slg", None),
-                    "cs_percentage": game["stat"].get("caughtStealingPercent", None),
+                    "date": game["game"].get("officialDate", game["game"].get("date", None)),
+                    "opponent": team_name,       # Opponent's name
+                    "opponent_id": opponent_id,  # Opponent's numeric ID
+                    "season": game.get("season"),  # Use the season value from the API response
+                    "home_away": "away" if game.get("isHome", False) else "home",
+                    "era": game["stat"].get("earnedRunAverage"),
+                    "whip": game["stat"].get("whip"),
+                    "opponent_obp": game["stat"].get("obp"),
+                    "opponent_slg": game["stat"].get("slg"),
+                    "cs_percentage": game["stat"].get("caughtStealingPercent"),
                     "errors": game["stat"].get("errors", 0),
-                })
-
-    return pd.DataFrame(opponent_defense_game_logs)
-
+                }
+                # print("DEBUG Opponent defense row:", row_dict)
+                opponent_defense_game_logs.append(row_dict)
+                
     return pd.DataFrame(opponent_defense_game_logs)
 
 # Fetch game logs with required parameters
@@ -416,6 +462,16 @@ opponent_defense_game_logs = fetch_opponent_defense_game_logs(seasons)
 # Convert to DataFrames
 df_opponent_offense_game_logs = pd.DataFrame(opponent_offense_game_logs)
 df_opponent_defense_game_logs = pd.DataFrame(opponent_defense_game_logs)
+
+# Debug Opponent Offense & Defense DataFrames
+print("DEBUG df_opponent_offense_game_logs shape:", df_opponent_offense_game_logs.shape)
+print("DEBUG df_opponent_offense_game_logs dtypes:\n", df_opponent_offense_game_logs.dtypes)
+print("DEBUG df_opponent_offense_game_logs head:\n", df_opponent_offense_game_logs.head(10))
+
+print("DEBUG df_opponent_defense_game_logs shape:", df_opponent_defense_game_logs.shape)
+print("DEBUG df_opponent_defense_game_logs dtypes:\n", df_opponent_defense_game_logs.dtypes)
+print("DEBUG df_opponent_defense_game_logs head(10):\n", df_opponent_defense_game_logs.head(10))
+
 
 # Upsert each DataFrame into PostgreSQL
 if not df_opponent_offense_game_logs.empty:
