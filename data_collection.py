@@ -98,7 +98,9 @@ def create_tables():
             game_id INTEGER NOT NULL,
             date DATE,
             team TEXT NOT NULL,
+            season INTEGER, 
             opponent TEXT,
+            opponent_id INTEGER,
             home_away TEXT,
             ab SMALLINT,
             h SMALLINT,
@@ -118,7 +120,6 @@ def create_tables():
             date DATE,
             team TEXT NOT NULL,  -- Ensuring team column is added dynamically
             season INTEGER,
-            opponent TEXT,
             opponent_id INTEGER,
             home_away TEXT,
             ab INTEGER,
@@ -139,7 +140,6 @@ def create_tables():
         CREATE TABLE IF NOT EXISTS opponent_offense_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
-            opponent TEXT NOT NULL,
             opponent_id INTEGER,
             season INTEGER,
             home_away TEXT,
@@ -152,15 +152,16 @@ def create_tables():
             so INTEGER,
             rbi INTEGER,
             ops TEXT,
-            UNIQUE (game_id, opponent)
+            runs INTEGER,
+            won BOOLEAN,
+            UNIQUE (game_id, opponent_id)
         );
         """),
         text("""
         CREATE TABLE IF NOT EXISTS opponent_defense_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
-            opponent TEXT NOT NULL,
-            opponent_id INTEGER,
+            opponent_id INTEGER NOT NULL,
             season INTEGER,
             home_away TEXT,
             era FLOAT,
@@ -169,7 +170,7 @@ def create_tables():
             opponent_slg FLOAT,
             cs_percentage FLOAT,
             errors INTEGER,
-            UNIQUE (game_id, opponent)
+            UNIQUE (game_id, opponent_id)
         );
         """)
     ]
@@ -200,20 +201,24 @@ def fetch_witt_game_logs(player_id, seasons):
             print(f"⚠️ No game logs available for Witt in {season}. Skipping.")
             continue
 
-        for game in data["stats"][0]["splits"]:  # ✅ Use `data` instead of `response`
+        for game in data["stats"][0]["splits"]:
             witt_game_logs.append({
                 "game_id": game["game"].get("gamePk", None),
-                "date": game["game"].get("officialDate", game["game"].get("date", None)),
+                "date": game.get("date", None),
                 "team": game["team"]["name"],
-                "opponent": game["opponent"]["name"],
+                "opponent": game.get("opponent", {}).get("name", None),
+                "opponent_id": game.get("opponent", {}).get("id", None),
+                "season": season,  # ✅ Inject the outer loop's season here
                 "home_away": "home" if game.get("isHome", False) else "away",
-                "ab": game["stat"].get("atBats", 0),
+                "pa": game["stat"].get("plateAppearances", 0),
                 "h": game["stat"].get("hits", 0),
                 "tb": game["stat"].get("totalBases", 0),
                 "sb": game["stat"].get("stolenBases", 0),
                 "cs": game["stat"].get("caughtStealing", 0),
                 "bb": game["stat"].get("baseOnBalls", 0),
                 "so": game["stat"].get("strikeOuts", 0),
+                "go": game["stat"].get("groundOuts", 0),
+                "ao": game["stat"].get("airOuts", 0),
                 "rbi": game["stat"].get("rbi", 0),
                 "ops": game["stat"].get("ops", None),
             })
@@ -244,33 +249,30 @@ def fetch_royals_game_logs(team_id, seasons):
         
         # Extract the team name once from the API response (assuming it's under "team" at the top level)
         team_name = data.get("team", {}).get("name", "Kansas City Royals")  # Default to KCR if missing
-        
+       
+        # Reintroduce the loop over the 'splits' list
         for game in data["stats"][0]["splits"]:
-            # Opponent info
-            opponent_info = game.get("opponent", {})
-            opponent_id = opponent_info.get("id", None)
-            opponent_name = opponent_info.get("name", None)
-
             royals_game_logs.append({
                 "game_id": game["game"].get("gamePk", None),
-                "date": game["game"].get("officialDate", game["game"].get("date", None)),
+                "date": game.get("date", None),
                 "team": team_name,  
                 "season": game.get("season", None),
-                "opponent": opponent_name,
-                "opponent_id": opponent_id,
+                "opponent_id": game.get("opponent", {}).get("id", None),
                 "home_away": "Home" if game.get("isHome", False) else "Away",
-                "ab": game["stat"].get("atBats", 0),
+                "pa": game["stat"].get("plateAppearances", 0),
                 "h": game["stat"].get("hits", 0),
                 "tb": game["stat"].get("totalBases", 0),
                 "sb": game["stat"].get("stolenBases", 0),
                 "cs": game["stat"].get("caughtStealing", 0),
                 "bb": game["stat"].get("baseOnBalls", 0),
                 "so": game["stat"].get("strikeOuts", 0),
+                "go": game["stat"].get("groundOuts", 0),
+                "ao": game["stat"].get("airOuts", 0),
                 "rbi": game["stat"].get("rbi", 0),
                 "ops": game["stat"].get("ops", None),
                 "runs": game["stat"].get("runs", 0),     # how many runs the Royals scored
                 "won": game.get("isWin", False),         # whether the Royals won this game
-            })
+                })
 
     return pd.DataFrame(royals_game_logs)
 
@@ -323,9 +325,6 @@ if not df_witt_game_logs.empty:
 
 if not df_royals_game_logs.empty:
     print("🤓 Columns in df_royals_game_logs (before upsert):", df_royals_game_logs.columns)
-    print("DEBUG: Max game_id:", df_royals_game_logs["game_id"].max()) # Printing max values, suspected exeeding limit 
-    print("DEBUG: Max opponent_id:", df_royals_game_logs["opponent_id"].max()) # Printing max values, suspected exeeding limit limit 
-    print("DEBUG: Max ab:", df_royals_game_logs["ab"].max()) # Printing max values, suspected exeeding limit 
     upsert_table(df_royals_game_logs, "royals_game_logs", ["game_id", "team"])
     print("✅ `royals_game_logs` upserted successfully!")
 
@@ -379,15 +378,19 @@ def fetch_opponent_offense_game_logs(seasons):
                     "opponent_id": opponent_id,  # Opponent's numeric ID
                     "season": game.get("season", None),
                     "home_away": "Home" if game.get("isHome", False) else "Away",
-                    "ab": game["stat"].get("atBats", 0),
+                    "pa": game["stat"].get("plateAppearances", 0),
                     "h": game["stat"].get("hits", 0),
                     "tb": game["stat"].get("totalBases", 0),
                     "sb": game["stat"].get("stolenBases", 0),
                     "cs": game["stat"].get("caughtStealing", 0),
                     "bb": game["stat"].get("baseOnBalls", 0),
                     "so": game["stat"].get("strikeOuts", 0),
+                    "go": game["stat"].get("groundOuts", 0),
+                    "ao": game["stat"].get("airOuts", 0),
                     "rbi": game["stat"].get("rbi", 0),
                     "ops": game["stat"].get("ops", None),
+                    "runs": game["stat"].get("runs", 0),     
+                    "won": game.get("isWin", False),         
                 }
                 # print("DEBUG Opponent offense row:", row_dict)
                 opponent_offense_game_logs.append(row_dict)
@@ -475,11 +478,11 @@ print("DEBUG df_opponent_defense_game_logs head(10):\n", df_opponent_defense_gam
 
 # Upsert each DataFrame into PostgreSQL
 if not df_opponent_offense_game_logs.empty:
-    upsert_table(df_opponent_offense_game_logs, "opponent_offense_game_logs", ["game_id", "team"])
+    upsert_table(df_opponent_offense_game_logs, "opponent_offense_game_logs", ["game_id", "opponent"])
     print("✅ `opponent_offense_game_logs` upserted successfully!")
 
 if not df_opponent_defense_game_logs.empty:
-    upsert_table(df_opponent_defense_game_logs, "opponent_defense_game_logs", ["game_id", "team"])
+    upsert_table(df_opponent_defense_game_logs, "opponent_defense_game_logs", ["game_id", "opponent"])
     print("✅ `opponent_defense_game_logs` upserted successfully!")
 
 
