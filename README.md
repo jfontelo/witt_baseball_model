@@ -109,7 +109,8 @@ data_collection.py  ──►  PostgreSQL (Render)
                       predictions.py  ──►  Probability Distribution
                                                     │
                                                     ▼
-                                         Compare vs DraftKings Implied Odds
+                                         Manual DraftKings Line Lookup
+                                         (convert odds to implied probability)
                                                     │
                                                     ▼
                                               Bet or Pass
