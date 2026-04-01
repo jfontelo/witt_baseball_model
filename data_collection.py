@@ -1,5 +1,5 @@
-### data_collection.py - Fetch & Store Royals Data
-import subprocess  # Allows installing missing packages
+### data_collection.py - Fetch & Store Witt Game Logs + Opposing Pitcher Stats
+import subprocess
 
 # Ensure required packages are installed
 try:
@@ -7,20 +7,14 @@ try:
 except ModuleNotFoundError:
     print("⚠️ requests not found. Installing...")
     subprocess.run(["pip", "install", "requests"], check=True)
-    import requests  # Re-import after installation
+    import requests
+
 try:
     import pandas as pd
 except ModuleNotFoundError:
     print("⚠️ pandas not found. Installing...")
     subprocess.run(["pip", "install", "pandas"], check=True)
-    import pandas as pd  # Import again after installation 
-
-try:
-    import statsapi
-except ModuleNotFoundError:
-    print("⚠️ MLB-StatsAPI not found. Installing...")
-    subprocess.run(["pip", "install", "MLB-StatsAPI"], check=True)
-    import statsapi
+    import pandas as pd
 
 try:
     import sqlalchemy
@@ -34,61 +28,110 @@ try:
 except ModuleNotFoundError:
     print("⚠️ psycopg2 not found. Installing...")
     subprocess.run(["pip", "install", "psycopg2-binary"], check=True)
-    import psycopg2  # Re-import after installation
+    import psycopg2
 
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, text
+from sqlalchemy import create_engine, MetaData, Table, text
 from sqlalchemy.dialects.postgresql import insert
 from config import DATABASE_URL
-import json
 
 # Connect to PostgreSQL
 engine = create_engine(DATABASE_URL)
 
-# API Base URL
-API_BASE = "https://statsapi.mlb.com/"
+
+# ─────────────────────────────────────────────
+# PARK FACTORS
+# Source: Baseball Savant Statcast Park Factors, 2025 single-year
+# 100 = league average, >100 = hitter friendly, <100 = pitcher friendly
+# Columns: overall park factor, 1B, 2B, 3B, HR factors
+# ─────────────────────────────────────────────
+
+PARK_FACTORS = {
+    # team_id: (park_factor, singles, doubles, triples, hr)
+    115: (115, 118, 126, 200, 110),  # Rockies - Coors Field
+    133: (108, 107, 122,  82, 112),  # Athletics - Sutter Health Park
+    116: (105, 104, 101, 161, 114),  # Tigers - Comerica Park
+    119: (104,  99,  98,  79, 137),  # Dodgers - Dodger Stadium
+    141: (103, 102, 100,  69, 118),  # Blue Jays - Rogers Centre
+    111: (103, 105, 114,  94,  84),  # Red Sox - Fenway Park
+    110: (103, 103, 103, 106, 121),  # Orioles - Camden Yards
+    143: (102, 104,  99, 109, 117),  # Phillies - Citizens Bank Park
+    109: (102, 102,  98, 113, 218),  # D-backs - Chase Field
+    139: (102, 104, 109,  85,  59),  # Rays - Steinbrenner Field
+    108: (101,  99,  99,  93,  96),  # Angels - Angel Stadium
+    120: (101, 104, 108,  98, 125),  # Nationals - Nationals Park
+    144: (101, 101, 103,  94,  83),  # Braves - Truist Park
+    142: (101, 103, 106, 112,  67),  # Twins - Target Field
+    113: ( 99,  97,  95,  99,  64),  # Reds - Great American Ball Park
+    137: ( 99, 100, 103, 107, 102),  # Giants - Oracle Park
+    121: ( 99,  99, 102,  89,  81),  # Mets - Citi Field
+    147: ( 99,  92,  90,  86,  91),  # Yankees - Yankee Stadium
+    158: ( 98,  95,  95,  94,  90),  # Brewers - American Family Field
+    112: ( 98,  96,  94,  89, 132),  # Cubs - Wrigley Field
+    145: ( 98,  96,  98,  91,  65),  # White Sox - Rate Field
+    117: ( 97,  97,  97,  92,  80),  # Astros - Daikin Park
+    146: ( 97,  98,  99, 101, 148),  # Marlins - loanDepot Park
+    138: ( 97, 103, 108, 109,  56),  # Cardinals - Busch Stadium
+    118: ( 97, 100,  99, 106, 212),  # Royals - Kauffman Stadium
+    134: ( 96, 100, 101, 117, 108),  # Pirates - PNC Park
+    135: ( 95,  92,  96,  82,  83),  # Padres - Petco Park
+    114: ( 95,  95,  98,  91,  63),  # Guardians - Progressive Field
+    140: ( 91,  92,  94,  98,  53),  # Rangers - Globe Life Field
+    136: ( 91,  89,  87,  95,  31),  # Mariners - T-Mobile Park
+}
+
+
+def get_park_factor(opponent_id, home_away):
+    """
+    Return park factor stats for a given game.
+    - If Witt is home, use Kauffman (team_id 118).
+    - If Witt is away, use the opponent's park.
+    """
+    if home_away == "home":
+        factors = PARK_FACTORS.get(118, (100, 100, 100, 100, 100))
+    else:
+        factors = PARK_FACTORS.get(opponent_id, (100, 100, 100, 100, 100))
+    return {
+        "park_factor":    factors[0],
+        "park_factor_1b": factors[1],
+        "park_factor_2b": factors[2],
+        "park_factor_3b": factors[3],
+        "park_factor_hr": factors[4],
+    }
+
+
+# ─────────────────────────────────────────────
+# UPSERT HELPER
+# ─────────────────────────────────────────────
 
 def upsert_table(df, table_name, unique_columns):
     """
     Upsert (insert or update) data into the given table based on unique constraints.
 
     Args:
-        df (pd.DataFrame): Dataframe containing the data to insert.
+        df (pd.DataFrame): DataFrame containing the data to insert.
         table_name (str): Name of the table in the database.
-        unique_columns (list): List of columns that define the unique constraint.
-
-    Returns:
-        None
+        unique_columns (list): Columns that define the unique constraint.
     """
     with engine.connect() as conn:
         metadata = MetaData()
         table = Table(table_name, metadata, autoload_with=engine)
 
-        # Convert DataFrame to list of dictionaries
         records = df.to_dict(orient="records")
-
-        # Prepare the insert statement
         stmt = insert(table).values(records)
 
-        # Define the update logic for ON CONFLICT
         update_columns = {col.name: col for col in table.columns if col.name not in unique_columns}
         upsert_stmt = stmt.on_conflict_do_update(
-            index_elements=unique_columns,  # Define uniqueness constraint
-            set_=update_columns  # Update all other columns
+            index_elements=unique_columns,
+            set_=update_columns
         )
 
-        # Execute the upsert statement
         conn.execute(upsert_stmt)
         conn.commit()
 
-# Function to create necessary tables if they don't exist
-import os
-from sqlalchemy import create_engine, text
 
-# Fetch database URL from environment variables
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-if DATABASE_URL is None:
-    raise ValueError("DATABASE_URL environment variable not set!")
+# ─────────────────────────────────────────────
+# TABLE CREATION
+# ─────────────────────────────────────────────
 
 def create_tables():
     """Create necessary tables if they don't exist."""
@@ -98,11 +141,11 @@ def create_tables():
             game_id INTEGER NOT NULL,
             date DATE,
             team TEXT NOT NULL,
-            season INTEGER, 
+            season INTEGER,
             opponent TEXT,
             opponent_id INTEGER,
             home_away TEXT,
-            ab SMALLINT,
+            pa SMALLINT,
             h SMALLINT,
             tb SMALLINT,
             sb SMALLINT,
@@ -115,62 +158,27 @@ def create_tables():
         );
         """),
         text("""
-        CREATE TABLE IF NOT EXISTS royals_game_logs (
+        CREATE TABLE IF NOT EXISTS pitcher_game_logs (
             game_id INTEGER NOT NULL,
             date DATE,
-            team TEXT NOT NULL,  -- Ensuring team column is added dynamically
             season INTEGER,
-            opponent_id INTEGER,
-            home_away TEXT,
-            ab INTEGER,
-            h INTEGER,
-            tb INTEGER,
-            sb INTEGER,
-            cs INTEGER,
-            bb INTEGER,
-            so INTEGER,
-            rbi INTEGER,
-            ops TEXT,
-            runs INTEGER,
-            won BOOLEAN,
-            UNIQUE (game_id, team)
-        );
-        """),
-        text("""
-        CREATE TABLE IF NOT EXISTS opponent_offense_game_logs (
-            game_id INTEGER NOT NULL,
-            date DATE,
-            opponent_id INTEGER,
-            season INTEGER,
-            home_away TEXT,
-            ab INTEGER,
-            h INTEGER,
-            tb INTEGER,
-            sb INTEGER,
-            cs INTEGER,
-            bb INTEGER,
-            so INTEGER,
-            rbi INTEGER,
-            ops TEXT,
-            runs INTEGER,
-            won BOOLEAN,
-            UNIQUE (game_id, opponent_id)
-        );
-        """),
-        text("""
-        CREATE TABLE IF NOT EXISTS opponent_defense_game_logs (
-            game_id INTEGER NOT NULL,
-            date DATE,
-            opponent_id INTEGER NOT NULL,
-            season INTEGER,
-            home_away TEXT,
+            pitcher_id INTEGER,
+            pitcher_name TEXT,
+            throws TEXT,
             era FLOAT,
             whip FLOAT,
-            opponent_obp FLOAT,
-            opponent_slg FLOAT,
-            cs_percentage FLOAT,
-            errors INTEGER,
-            UNIQUE (game_id, opponent_id)
+            k_per_9 FLOAT,
+            UNIQUE (game_id)
+        );
+        """),
+        text("""
+        CREATE TABLE IF NOT EXISTS park_factors (
+            team_id INTEGER PRIMARY KEY,
+            park_factor INTEGER,
+            park_factor_1b INTEGER,
+            park_factor_2b INTEGER,
+            park_factor_3b INTEGER,
+            park_factor_hr INTEGER
         );
         """)
     ]
@@ -180,22 +188,29 @@ def create_tables():
             conn.execute(statement)
         conn.commit()
 
-# Call function to ensure tables exist before inserting data
 create_tables()
-        
-# Fetch Bobby Witt Jr.'s historical game logs
+
+
+# ─────────────────────────────────────────────
+# FETCH WITT GAME LOGS
+# ─────────────────────────────────────────────
+
 def fetch_witt_game_logs(player_id, seasons):
+    """Fetch Bobby Witt Jr.'s per-game hitting stats for the given seasons."""
     witt_game_logs = []
 
     for season in seasons:
         try:
-            url = f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats?stats=gameLog&group=hitting&season={season}"
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats"
+                f"?stats=gameLog&group=hitting&season={season}"
+            )
             response = requests.get(url)
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
             print(f"⚠️ API request failed for Witt's logs in {season}: {e}")
-            continue  # Skip to the next season if API fails
+            continue
 
         if "stats" not in data or not data["stats"]:
             print(f"⚠️ No game logs available for Witt in {season}. Skipping.")
@@ -208,7 +223,7 @@ def fetch_witt_game_logs(player_id, seasons):
                 "team": game["team"]["name"],
                 "opponent": game.get("opponent", {}).get("name", None),
                 "opponent_id": game.get("opponent", {}).get("id", None),
-                "season": season,  # ✅ Inject the outer loop's season here
+                "season": season,
                 "home_away": "home" if game.get("isHome", False) else "away",
                 "pa": game["stat"].get("plateAppearances", 0),
                 "h": game["stat"].get("hits", 0),
@@ -217,275 +232,246 @@ def fetch_witt_game_logs(player_id, seasons):
                 "cs": game["stat"].get("caughtStealing", 0),
                 "bb": game["stat"].get("baseOnBalls", 0),
                 "so": game["stat"].get("strikeOuts", 0),
-                "go": game["stat"].get("groundOuts", 0),
-                "ao": game["stat"].get("airOuts", 0),
                 "rbi": game["stat"].get("rbi", 0),
                 "ops": game["stat"].get("ops", None),
             })
 
     return pd.DataFrame(witt_game_logs)
-    
-# Fetch Royals historical game logs
-def fetch_royals_game_logs(team_id, seasons):
-    """
-    Fetch per-game offensive stats for the Kansas City Royals from the MLB API,
-    including opponent ID, runs scored, and win/loss indicator.
-    """
-    royals_game_logs = []
 
-    for season in seasons:
+
+# ─────────────────────────────────────────────
+# FETCH OPPOSING PITCHER GAME LOGS
+# ─────────────────────────────────────────────
+
+def get_opposing_starting_pitcher(game_id, royals_team_id=118):
+    """
+    For a given game_id, fetch the boxscore and return the opposing team's
+    starting pitcher (first pitcher listed for the non-Royals side).
+
+    Returns:
+        dict with pitcher_id and pitcher_name, or None if not found.
+    """
+    try:
+        url = f"https://statsapi.mlb.com/api/v1/game/{game_id}/boxscore"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Boxscore fetch failed for game {game_id}: {e}")
+        return None
+
+    teams = data.get("teams", {})
+    for side in ["away", "home"]:
+        team_info = teams.get(side, {})
+        team_id = team_info.get("team", {}).get("id")
+        if team_id != royals_team_id:
+            pitchers = team_info.get("pitchers", [])
+            if pitchers:
+                starter_id = pitchers[0]  # First pitcher listed = starter
+                players = team_info.get("players", {})
+                player_key = f"ID{starter_id}"
+                player_info = players.get(player_key, {}).get("person", {})
+                return {
+                    "pitcher_id": starter_id,
+                    "pitcher_name": player_info.get("fullName", "Unknown"),
+                }
+
+    return None
+
+
+def get_pitcher_season_stats(pitcher_id, season, before_date):
+    """
+    Compute a pitcher's cumulative ERA, WHIP, and K/9 entering a specific game,
+    using only games they pitched in that season before before_date.
+
+    For rookies or pitchers with no prior appearances, falls back to league averages.
+
+    Args:
+        pitcher_id (int): MLB pitcher ID.
+        season (int): Season year.
+        before_date (str): ISO date string (YYYY-MM-DD). Only games before this date count.
+
+    Returns:
+        dict with throws, era, whip, k_per_9.
+    """
+    # League average fallbacks (MLB ~2022-2024 averages)
+    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8}
+
+    try:
+        # Fetch pitcher's game log for the season
+        gamelog_url = (
+            f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+            f"?stats=gameLog&group=pitching&season={season}"
+        )
+        gamelog_response = requests.get(gamelog_url)
+        gamelog_response.raise_for_status()
+        gamelog_data = gamelog_response.json()
+
+        # Fetch handedness
+        bio_url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}"
+        bio_response = requests.get(bio_url)
+        bio_response.raise_for_status()
+        bio_data = bio_response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Pitcher fetch failed for {pitcher_id}, {season}: {e}")
+        return None
+
+    # Get handedness
+    throws = None
+    people = bio_data.get("people", [])
+    if people:
+        throws = people[0].get("pitchHand", {}).get("code")  # "R" or "L"
+
+    # Filter game log to only games before the target date
+    splits = (
+        gamelog_data.get("stats", [{}])[0].get("splits", [])
+        if gamelog_data.get("stats")
+        else []
+    )
+    prior_games = [
+        g for g in splits
+        if g.get("date", "9999-99-99") < before_date
+    ]
+
+    # No prior appearances → use league averages
+    if not prior_games:
+        print(f"  ℹ️ No prior appearances for pitcher {pitcher_id} before {before_date}. Using league averages.")
+        return {"throws": throws, **LEAGUE_AVG}
+
+    # Accumulate raw counting stats across prior games
+    total_earned_runs = 0
+    total_innings = 0.0
+    total_hits = 0
+    total_walks = 0
+    total_strikeouts = 0
+
+    for game in prior_games:
+        stat = game.get("stat", {})
+
+        # Innings pitched stored as "6.1" meaning 6 and 1/3 innings
+        ip_str = stat.get("inningsPitched", "0")
         try:
-            url = f"https://statsapi.mlb.com/api/v1/teams/{team_id}/stats?stats=gameLog&group=hitting&season={season}"
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ API request failed for Royals' logs in {season}: {e}")
-            continue  # Skip to the next season if API fails
+            ip_whole, ip_frac = divmod(float(ip_str), 1)
+            innings = ip_whole + (ip_frac * 10 / 3)  # convert .1 → 1/3, .2 → 2/3
+        except (ValueError, TypeError):
+            innings = 0.0
 
-        if "stats" not in data or not data["stats"]:
-            print(f"⚠️ No game logs available for Royals in {season}. Skipping.")
+        total_earned_runs += stat.get("earnedRuns", 0)
+        total_innings += innings
+        total_hits += stat.get("hits", 0)
+        total_walks += stat.get("baseOnBalls", 0)
+        total_strikeouts += stat.get("strikeOuts", 0)
+
+    # Compute cumulative ERA, WHIP, K/9 — guard against division by zero
+    if total_innings == 0:
+        return {"throws": throws, **LEAGUE_AVG}
+
+    era = round((total_earned_runs / total_innings) * 9, 2)
+    whip = round((total_hits + total_walks) / total_innings, 2)
+    k_per_9 = round((total_strikeouts / total_innings) * 9, 2)
+
+    return {"throws": throws, "era": era, "whip": whip, "k_per_9": k_per_9}
+
+
+def fetch_pitcher_game_logs(witt_df):
+    """
+    For each game in Witt's game log, look up the opposing starting pitcher
+    and their season stats. Returns a DataFrame ready to upsert.
+
+    Args:
+        witt_df (pd.DataFrame): Witt's game logs (must have game_id, date, season columns).
+    """
+    pitcher_rows = []
+    seen_game_ids = set()
+
+    for _, row in witt_df.iterrows():
+        game_id = row["game_id"]
+        season = row["season"]
+        date = row["date"]
+
+        if game_id in seen_game_ids or pd.isna(game_id):
             continue
-        
-        # Extract the team name once from the API response (assuming it's under "team" at the top level)
-        team_name = data.get("team", {}).get("name", "Kansas City Royals")  # Default to KCR if missing
-       
-        # Reintroduce the loop over the 'splits' list
-        for game in data["stats"][0]["splits"]:
-            royals_game_logs.append({
-                "game_id": game["game"].get("gamePk", None),
-                "date": game.get("date", None),
-                "team": team_name,  
-                "season": game.get("season", None),
-                "opponent_id": game.get("opponent", {}).get("id", None),
-                "home_away": "Home" if game.get("isHome", False) else "Away",
-                "pa": game["stat"].get("plateAppearances", 0),
-                "h": game["stat"].get("hits", 0),
-                "tb": game["stat"].get("totalBases", 0),
-                "sb": game["stat"].get("stolenBases", 0),
-                "cs": game["stat"].get("caughtStealing", 0),
-                "bb": game["stat"].get("baseOnBalls", 0),
-                "so": game["stat"].get("strikeOuts", 0),
-                "go": game["stat"].get("groundOuts", 0),
-                "ao": game["stat"].get("airOuts", 0),
-                "rbi": game["stat"].get("rbi", 0),
-                "ops": game["stat"].get("ops", None),
-                "runs": game["stat"].get("runs", 0),     # how many runs the Royals scored
-                "won": game.get("isWin", False),         # whether the Royals won this game
-                })
+        seen_game_ids.add(game_id)
 
-    return pd.DataFrame(royals_game_logs)
+        pitcher_info = get_opposing_starting_pitcher(int(game_id))
+        if not pitcher_info:
+            print(f"⚠️ Could not identify starting pitcher for game {game_id}. Skipping.")
+            continue
+
+        pitcher_id = pitcher_info["pitcher_id"]
+        pitcher_name = pitcher_info["pitcher_name"]
+
+        stats = get_pitcher_season_stats(pitcher_id, season, before_date=str(date))
+        if not stats:
+            continue
+
+        pitcher_rows.append({
+            "game_id": int(game_id),
+            "date": date,
+            "season": season,
+            "pitcher_id": pitcher_id,
+            "pitcher_name": pitcher_name,
+            "throws": stats["throws"],
+            "era": stats["era"],
+            "whip": stats["whip"],
+            "k_per_9": stats["k_per_9"],
+        })
+
+    return pd.DataFrame(pitcher_rows)
 
 
-# Define player/team IDs
-player_id = 677951  # Bobby Witt Jr.'s Player ID
-team_id = 118  # Kansas City Royals Team ID
-seasons = list(range(2022, pd.Timestamp.today().year))  # Fetch from 2022 onward
+def upsert_park_factors():
+    """Load the PARK_FACTORS dictionary into the park_factors table."""
+    records = [
+        {
+            "team_id":        team_id,
+            "park_factor":    factors[0],
+            "park_factor_1b": factors[1],
+            "park_factor_2b": factors[2],
+            "park_factor_3b": factors[3],
+            "park_factor_hr": factors[4],
+        }
+        for team_id, factors in PARK_FACTORS.items()
+    ]
+    df = pd.DataFrame(records)
+    upsert_table(df, "park_factors", ["team_id"])
 
-# Fetch game logs with required parameters
-witt_game_logs = fetch_witt_game_logs(player_id, seasons)
-royals_game_logs = fetch_royals_game_logs(team_id, seasons)
 
-# Convert to DataFrames
-df_witt_game_logs = pd.DataFrame(witt_game_logs)
-df_royals_game_logs = pd.DataFrame(royals_game_logs)
+# ─────────────────────────────────────────────
+# RUN PIPELINE
+# ─────────────────────────────────────────────
 
-# Ensure column names are lowercase and stripped of whitespace
+player_id = 677951  # Bobby Witt Jr.
+seasons = list(range(2022, pd.Timestamp.today().year))
+
+# 1. Fetch and upsert Witt's game logs
+print("Fetching Witt game logs...")
+df_witt_game_logs = fetch_witt_game_logs(player_id, seasons)
 df_witt_game_logs.columns = df_witt_game_logs.columns.str.lower().str.strip()
-df_royals_game_logs.columns = df_royals_game_logs.columns.str.lower().str.strip()
 
-# Debug: Confirm that lowercasing worked properly
-print("Columns in df_witt_game_logs (before upsert):", list(df_witt_game_logs.columns))
-print("Columns in df_royals_game_logs (before upsert):", list(df_royals_game_logs.columns))
-
-# Fetch PostgreSQL table schema for comparison
 with engine.connect() as conn:
-    witt_result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'"))
-    royals_result = conn.execute(text("SELECT column_name FROM information_schema.columns WHERE table_name = 'royals_game_logs'"))
-
-    witt_columns = [row[0] for row in witt_result]
-    royals_columns = [row[0] for row in royals_result]
-
-    print("Columns in PostgreSQL witt_game_logs:", witt_columns)
-    print("Columns in PostgreSQL royals_game_logs:", royals_columns)
-
-# Ensure "team" exists in royals_game_logs to avoid KeyError
-if "team" not in df_royals_game_logs.columns:
-    df_royals_game_logs["team"] = "Kansas City Royals"
-
-# Ensure DataFrame contains only columns that exist in PostgreSQL, filling missing ones with None
+    witt_columns = [
+        row[0] for row in conn.execute(
+            text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'")
+        )
+    ]
 df_witt_game_logs = df_witt_game_logs.reindex(columns=witt_columns, fill_value=None)
-df_royals_game_logs = df_royals_game_logs.reindex(columns=royals_columns, fill_value=None)
 
-# Upsert each DataFrame into PostgreSQL
 if not df_witt_game_logs.empty:
-    print("🤓 Columns in df_witt_game_logs (before upsert):", df_witt_game_logs.columns)
     upsert_table(df_witt_game_logs, "witt_game_logs", ["game_id", "team"])
-    print("✅ `witt_game_logs` upserted successfully!")
+    print("✅ witt_game_logs upserted successfully!")
 
-if not df_royals_game_logs.empty:
-    print("🤓 Columns in df_royals_game_logs (before upsert):", df_royals_game_logs.columns)
-    upsert_table(df_royals_game_logs, "royals_game_logs", ["game_id", "team"])
-    print("✅ `royals_game_logs` upserted successfully!")
+# 2. Fetch and upsert opposing pitcher stats for each Witt game
+print("Fetching opposing pitcher stats...")
+df_pitcher_game_logs = fetch_pitcher_game_logs(df_witt_game_logs)
 
-# BECAUSE THE OPPONENT LOGS WERE USING THE ROYALS_GAME_LOGS OPPONENT_ID & GAME_ID, WE'LL HAVE TO RUN THIS MODULE BELOW
+if not df_pitcher_game_logs.empty:
+    upsert_table(df_pitcher_game_logs, "pitcher_game_logs", ["game_id"])
+    print("✅ pitcher_game_logs upserted successfully!")
 
-# Fetch opponent historical offensive game logs
-def fetch_opponent_offense_game_logs(seasons):
-    """
-    Fetches per-game offensive stats for opponents that faced the Royals.
-    This version uses the numeric opponent ID (from the 'opponent_id' column) along with the opponent name.
-    """
-    opponent_offense_game_logs = []
-
-    for season in seasons:
-        print("DEBUG: season =", season, "type =", type(season))
-        
-        query = """
-            SELECT DISTINCT opponent, opponent_id, game_id
-            FROM royals_game_logs
-            WHERE season = %s;
-        """
-        opponent_teams = pd.read_sql(query, con=engine, params=(season,))  # Using a single-element tuple
-        
-        for _, row in opponent_teams.iterrows():
-            team_name = row["opponent"]
-            opponent_id = row["opponent_id"]
-            game_id = row["game_id"]
-
-            try:
-                # Use the numeric opponent ID in the API call
-                url = (
-                    f"https://statsapi.mlb.com/api/v1/teams/stats?"
-                    f"team={opponent_id}&group=hitting&stats=gameLog&season={season}"
-                )
-                response = requests.get(url)
-                response.raise_for_status()
-                data = response.json()
-            except requests.exceptions.RequestException as e:
-                print(f"⚠️ API request failed for {team_name} (ID {opponent_id}) offense logs in {season}: {e}")
-                continue
-
-            if "stats" not in data or not data["stats"]:
-                print(f"⚠️ No offensive stats for {team_name} (ID {opponent_id}) in {season}. Skipping.")
-                continue
-
-            for game in data["stats"][0]["splits"]:
-                row_dict = {
-                    "game_id": game["game"].get("gamePk", None),
-                    "date": game["game"].get("officialDate", game["game"].get("date", None)),
-                    "opponent": team_name,       # Opponent's name
-                    "opponent_id": opponent_id,  # Opponent's numeric ID
-                    "season": game.get("season", None),
-                    "home_away": "Home" if game.get("isHome", False) else "Away",
-                    "pa": game["stat"].get("plateAppearances", 0),
-                    "h": game["stat"].get("hits", 0),
-                    "tb": game["stat"].get("totalBases", 0),
-                    "sb": game["stat"].get("stolenBases", 0),
-                    "cs": game["stat"].get("caughtStealing", 0),
-                    "bb": game["stat"].get("baseOnBalls", 0),
-                    "so": game["stat"].get("strikeOuts", 0),
-                    "go": game["stat"].get("groundOuts", 0),
-                    "ao": game["stat"].get("airOuts", 0),
-                    "rbi": game["stat"].get("rbi", 0),
-                    "ops": game["stat"].get("ops", None),
-                    "runs": game["stat"].get("runs", 0),     
-                    "won": game.get("isWin", False),         
-                }
-                # print("DEBUG Opponent offense row:", row_dict)
-                opponent_offense_game_logs.append(row_dict)
-                
-    return pd.DataFrame(opponent_offense_game_logs)
-    
-# Fetch opponent historical defensive game logs
-def fetch_opponent_defense_game_logs(seasons):
-    """
-    Fetches per-game defensive stats for opponents that faced the Royals.
-    This version uses the numeric opponent ID (from the 'opponent_id' column) along with the opponent name.
-    """
-    opponent_defense_game_logs = []
-
-    for season in seasons:
-        print("DEBUG: season =", season, "type =", type(season))
-        
-        # Query to retrieve distinct opponent, opponent_id, and game_id for the season.
-        query = """
-            SELECT DISTINCT opponent, opponent_id, game_id
-            FROM royals_game_logs
-            WHERE season = %s;
-        """
-        opponent_teams = pd.read_sql(query, con=engine, params=(season,))  # Using a single-element tuple
-        
-        for _, row in opponent_teams.iterrows():
-            team_name = row["opponent"]
-            opponent_id = row["opponent_id"]
-            game_id = row["game_id"]
-
-            try:
-                # Use the numeric opponent ID in the API call
-                url = (
-                    f"https://statsapi.mlb.com/api/v1/teams/stats?"
-                    f"team={opponent_id}&group=pitching,fielding&stats=gameLog&season={season}"
-                )
-                response = requests.get(url)
-                response.raise_for_status()
-                data = response.json()
-            except requests.exceptions.RequestException as e:
-                print(f"⚠️ API request failed for {team_name} (ID {opponent_id}) defense logs in {season}: {e}")
-                continue
-
-            if "stats" not in data or not data["stats"]:
-                print(f"⚠️ No defensive stats for {team_name} (ID {opponent_id}) in {season}. Skipping.")
-                continue
-
-            for game in data["stats"][0]["splits"]:
-                row_dict = {
-                    "game_id": game["game"].get("gamePk", None),
-                    "date": game["game"].get("officialDate", game["game"].get("date", None)),
-                    "opponent": team_name,       # Opponent's name
-                    "opponent_id": opponent_id,  # Opponent's numeric ID
-                    "season": game.get("season"),  # Use the season value from the API response
-                    "home_away": "away" if game.get("isHome", False) else "home",
-                    "era": game["stat"].get("earnedRunAverage"),
-                    "whip": game["stat"].get("whip"),
-                    "opponent_obp": game["stat"].get("obp"),
-                    "opponent_slg": game["stat"].get("slg"),
-                    "cs_percentage": game["stat"].get("caughtStealingPercent"),
-                    "errors": game["stat"].get("errors", 0),
-                }
-                # print("DEBUG Opponent defense row:", row_dict)
-                opponent_defense_game_logs.append(row_dict)
-                
-    return pd.DataFrame(opponent_defense_game_logs)
-
-# Fetch game logs with required parameters
-opponent_offense_game_logs = fetch_opponent_offense_game_logs(seasons)
-opponent_defense_game_logs = fetch_opponent_defense_game_logs(seasons)
-
-# Convert to DataFrames
-df_opponent_offense_game_logs = pd.DataFrame(opponent_offense_game_logs)
-df_opponent_defense_game_logs = pd.DataFrame(opponent_defense_game_logs)
-
-# Debug Opponent Offense & Defense DataFrames
-print("DEBUG df_opponent_offense_game_logs shape:", df_opponent_offense_game_logs.shape)
-print("DEBUG df_opponent_offense_game_logs dtypes:\n", df_opponent_offense_game_logs.dtypes)
-print("DEBUG df_opponent_offense_game_logs head:\n", df_opponent_offense_game_logs.head(10))
-
-print("DEBUG df_opponent_defense_game_logs shape:", df_opponent_defense_game_logs.shape)
-print("DEBUG df_opponent_defense_game_logs dtypes:\n", df_opponent_defense_game_logs.dtypes)
-print("DEBUG df_opponent_defense_game_logs head(10):\n", df_opponent_defense_game_logs.head(10))
-
-
-# Upsert each DataFrame into PostgreSQL
-if not df_opponent_offense_game_logs.empty:
-    upsert_table(df_opponent_offense_game_logs, "opponent_offense_game_logs", ["game_id", "opponent"])
-    print("✅ `opponent_offense_game_logs` upserted successfully!")
-
-if not df_opponent_defense_game_logs.empty:
-    upsert_table(df_opponent_defense_game_logs, "opponent_defense_game_logs", ["game_id", "opponent"])
-    print("✅ `opponent_defense_game_logs` upserted successfully!")
-
+# 3. Upsert park factors
+print("Upserting park factors...")
+upsert_park_factors()
+print("✅ park_factors upserted successfully!")
 
 print("🚀 Data collection complete and stored in PostgreSQL!")
-
-
