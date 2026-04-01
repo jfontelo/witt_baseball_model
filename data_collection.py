@@ -439,39 +439,41 @@ def upsert_park_factors():
 
 # ─────────────────────────────────────────────
 # RUN PIPELINE
+# Only executes when run directly, not when imported
 # ─────────────────────────────────────────────
 
-player_id = 677951  # Bobby Witt Jr.
-seasons = list(range(2022, pd.Timestamp.today().year))
+if __name__ == "__main__":
+    player_id = 677951  # Bobby Witt Jr.
+    seasons = list(range(2022, pd.Timestamp.today().year))
 
-# 1. Fetch and upsert Witt's game logs
-print("Fetching Witt game logs...")
-df_witt_game_logs = fetch_witt_game_logs(player_id, seasons)
-df_witt_game_logs.columns = df_witt_game_logs.columns.str.lower().str.strip()
+    # 1. Fetch and upsert Witt's game logs
+    print("Fetching Witt game logs...")
+    df_witt_game_logs = fetch_witt_game_logs(player_id, seasons)
+    df_witt_game_logs.columns = df_witt_game_logs.columns.str.lower().str.strip()
 
-with engine.connect() as conn:
-    witt_columns = [
-        row[0] for row in conn.execute(
-            text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'")
-        )
-    ]
-df_witt_game_logs = df_witt_game_logs.reindex(columns=witt_columns, fill_value=None)
+    with engine.connect() as conn:
+        witt_columns = [
+            row[0] for row in conn.execute(
+                text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'")
+            )
+        ]
+    df_witt_game_logs = df_witt_game_logs.reindex(columns=witt_columns, fill_value=None)
 
-if not df_witt_game_logs.empty:
-    upsert_table(df_witt_game_logs, "witt_game_logs", ["game_id", "team"])
-    print("✅ witt_game_logs upserted successfully!")
+    if not df_witt_game_logs.empty:
+        upsert_table(df_witt_game_logs, "witt_game_logs", ["game_id", "team"])
+        print("✅ witt_game_logs upserted successfully!")
 
-# 2. Fetch and upsert opposing pitcher stats for each Witt game
-print("Fetching opposing pitcher stats...")
-df_pitcher_game_logs = fetch_pitcher_game_logs(df_witt_game_logs)
+    # 2. Fetch and upsert opposing pitcher stats for each Witt game
+    print("Fetching opposing pitcher stats...")
+    df_pitcher_game_logs = fetch_pitcher_game_logs(df_witt_game_logs)
 
-if not df_pitcher_game_logs.empty:
-    upsert_table(df_pitcher_game_logs, "pitcher_game_logs", ["game_id"])
-    print("✅ pitcher_game_logs upserted successfully!")
+    if not df_pitcher_game_logs.empty:
+        upsert_table(df_pitcher_game_logs, "pitcher_game_logs", ["game_id"])
+        print("✅ pitcher_game_logs upserted successfully!")
 
-# 3. Upsert park factors
-print("Upserting park factors...")
-upsert_park_factors()
-print("✅ park_factors upserted successfully!")
+    # 3. Upsert park factors
+    print("Upserting park factors...")
+    upsert_park_factors()
+    print("✅ park_factors upserted successfully!")
 
-print("🚀 Data collection complete and stored in PostgreSQL!")
+    print("🚀 Data collection complete and stored in PostgreSQL!")
