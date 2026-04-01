@@ -42,41 +42,40 @@ engine = create_engine(DATABASE_URL)
 # PARK FACTORS
 # Source: Baseball Savant Statcast Park Factors, 2025 single-year
 # 100 = league average, >100 = hitter friendly, <100 = pitcher friendly
-# Columns: overall park factor, 1B, 2B, 3B, HR factors
+# Keys: team_id → (park_name, park_factor, 1B, 2B, 3B, HR)
 # ─────────────────────────────────────────────
 
 PARK_FACTORS = {
-    # team_id: (park_factor, singles, doubles, triples, hr)
-    115: (115, 118, 126, 200, 110),  # Rockies - Coors Field
-    133: (108, 107, 122,  82, 112),  # Athletics - Sutter Health Park
-    116: (105, 104, 101, 161, 114),  # Tigers - Comerica Park
-    119: (104,  99,  98,  79, 137),  # Dodgers - Dodger Stadium
-    141: (103, 102, 100,  69, 118),  # Blue Jays - Rogers Centre
-    111: (103, 105, 114,  94,  84),  # Red Sox - Fenway Park
-    110: (103, 103, 103, 106, 121),  # Orioles - Camden Yards
-    143: (102, 104,  99, 109, 117),  # Phillies - Citizens Bank Park
-    109: (102, 102,  98, 113, 218),  # D-backs - Chase Field
-    139: (102, 104, 109,  85,  59),  # Rays - Steinbrenner Field
-    108: (101,  99,  99,  93,  96),  # Angels - Angel Stadium
-    120: (101, 104, 108,  98, 125),  # Nationals - Nationals Park
-    144: (101, 101, 103,  94,  83),  # Braves - Truist Park
-    142: (101, 103, 106, 112,  67),  # Twins - Target Field
-    113: ( 99,  97,  95,  99,  64),  # Reds - Great American Ball Park
-    137: ( 99, 100, 103, 107, 102),  # Giants - Oracle Park
-    121: ( 99,  99, 102,  89,  81),  # Mets - Citi Field
-    147: ( 99,  92,  90,  86,  91),  # Yankees - Yankee Stadium
-    158: ( 98,  95,  95,  94,  90),  # Brewers - American Family Field
-    112: ( 98,  96,  94,  89, 132),  # Cubs - Wrigley Field
-    145: ( 98,  96,  98,  91,  65),  # White Sox - Rate Field
-    117: ( 97,  97,  97,  92,  80),  # Astros - Daikin Park
-    146: ( 97,  98,  99, 101, 148),  # Marlins - loanDepot Park
-    138: ( 97, 103, 108, 109,  56),  # Cardinals - Busch Stadium
-    118: ( 97, 100,  99, 106, 212),  # Royals - Kauffman Stadium
-    134: ( 96, 100, 101, 117, 108),  # Pirates - PNC Park
-    135: ( 95,  92,  96,  82,  83),  # Padres - Petco Park
-    114: ( 95,  95,  98,  91,  63),  # Guardians - Progressive Field
-    140: ( 91,  92,  94,  98,  53),  # Rangers - Globe Life Field
-    136: ( 91,  89,  87,  95,  31),  # Mariners - T-Mobile Park
+    115: ("Coors Field",              115, 118, 126, 200, 110),
+    133: ("Sutter Health Park",       108, 107, 122,  82, 112),
+    116: ("Comerica Park",            105, 104, 101, 161, 114),
+    119: ("Dodger Stadium",           104,  99,  98,  79, 137),
+    141: ("Rogers Centre",            103, 102, 100,  69, 118),
+    111: ("Fenway Park",              103, 105, 114,  94,  84),
+    110: ("Camden Yards",             103, 103, 103, 106, 121),
+    143: ("Citizens Bank Park",       102, 104,  99, 109, 117),
+    109: ("Chase Field",              102, 102,  98, 113, 218),
+    139: ("Steinbrenner Field",       102, 104, 109,  85,  59),
+    108: ("Angel Stadium",            101,  99,  99,  93,  96),
+    120: ("Nationals Park",           101, 104, 108,  98, 125),
+    144: ("Truist Park",              101, 101, 103,  94,  83),
+    142: ("Target Field",             101, 103, 106, 112,  67),
+    113: ("Great American Ball Park",  99,  97,  95,  99,  64),
+    137: ("Oracle Park",               99, 100, 103, 107, 102),
+    121: ("Citi Field",                99,  99, 102,  89,  81),
+    147: ("Yankee Stadium",            99,  92,  90,  86,  91),
+    158: ("American Family Field",     98,  95,  95,  94,  90),
+    112: ("Wrigley Field",             98,  96,  94,  89, 132),
+    145: ("Rate Field",                98,  96,  98,  91,  65),
+    117: ("Daikin Park",               97,  97,  97,  92,  80),
+    146: ("loanDepot Park",            97,  98,  99, 101, 148),
+    138: ("Busch Stadium",             97, 103, 108, 109,  56),
+    118: ("Kauffman Stadium",          97, 100,  99, 106, 212),
+    134: ("PNC Park",                  96, 100, 101, 117, 108),
+    135: ("Petco Park",                95,  92,  96,  82,  83),
+    114: ("Progressive Field",         95,  95,  98,  91,  63),
+    140: ("Globe Life Field",          91,  92,  94,  98,  53),
+    136: ("T-Mobile Park",             91,  89,  87,  95,  31),
 }
 
 
@@ -86,16 +85,15 @@ def get_park_factor(opponent_id, home_away):
     - If Witt is home, use Kauffman (team_id 118).
     - If Witt is away, use the opponent's park.
     """
-    if home_away == "home":
-        factors = PARK_FACTORS.get(118, (100, 100, 100, 100, 100))
-    else:
-        factors = PARK_FACTORS.get(opponent_id, (100, 100, 100, 100, 100))
+    team_id = 118 if home_away == "home" else opponent_id
+    factors = PARK_FACTORS.get(team_id, ("Unknown", 100, 100, 100, 100, 100))
     return {
-        "park_factor":    factors[0],
-        "park_factor_1b": factors[1],
-        "park_factor_2b": factors[2],
-        "park_factor_3b": factors[3],
-        "park_factor_hr": factors[4],
+        "park_name":      factors[0],
+        "park_factor":    factors[1],
+        "park_factor_1b": factors[2],
+        "park_factor_2b": factors[3],
+        "park_factor_3b": factors[4],
+        "park_factor_hr": factors[5],
     }
 
 
@@ -174,6 +172,7 @@ def create_tables():
         text("""
         CREATE TABLE IF NOT EXISTS park_factors (
             team_id INTEGER PRIMARY KEY,
+            park_name TEXT,
             park_factor INTEGER,
             park_factor_1b INTEGER,
             park_factor_2b INTEGER,
@@ -425,11 +424,12 @@ def upsert_park_factors():
     records = [
         {
             "team_id":        team_id,
-            "park_factor":    factors[0],
-            "park_factor_1b": factors[1],
-            "park_factor_2b": factors[2],
-            "park_factor_3b": factors[3],
-            "park_factor_hr": factors[4],
+            "park_name":      factors[0],
+            "park_factor":    factors[1],
+            "park_factor_1b": factors[2],
+            "park_factor_2b": factors[3],
+            "park_factor_3b": factors[4],
+            "park_factor_hr": factors[5],
         }
         for team_id, factors in PARK_FACTORS.items()
     ]
