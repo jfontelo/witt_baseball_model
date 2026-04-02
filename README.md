@@ -129,8 +129,8 @@ data_collection.py  ──►  PostgreSQL (Render)
 - [x] Fetch Witt per-game historical logs via MLB Stats API
 - [x] Fetch Royals team game logs
 - [x] Upsert pipeline with conflict handling
-- [ ] Add starting pitcher lookup by game
-- [ ] Add static ballpark factor table
+- [x] Add starting pitcher lookup by game
+- [x] Add static ballpark factor table
 
 ### 🔄 Phase 2 - Feature Engineering
 - [ ] Build rolling window TB averages (7, 14, 30 day)
@@ -216,8 +216,7 @@ python predictions.py      # Generate tonight's prediction
 ## 📚 Data Sources
 
 - [MLB Stats API](https://statsapi.mlb.com) - Game logs, player stats, pitcher data
-- [FanGraphs Park Factors](https://www.fangraphs.com/guts.aspx?type=pf) - Park adjustment data
-- [DraftKings](https://www.draftkings.com) - Prop lines and odds (manual input)
+- [Baseball Savant](https://baseballsavant.mlb.com) - Park adjustment data
 
 ---
 
