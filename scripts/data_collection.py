@@ -129,6 +129,7 @@ def create_tables():
             home_away TEXT,
             pa SMALLINT,
             h SMALLINT,
+            hr SMALLINT,
             tb SMALLINT,
             sb SMALLINT,
             cs SMALLINT,
@@ -182,8 +183,9 @@ def create_tables():
         """),
     ]
 
-    # Migrate existing pitcher_game_logs table if new columns are missing
+    # Migrate existing tables if new columns are missing
     migrate_statements = [
+        text("ALTER TABLE witt_game_logs ADD COLUMN IF NOT EXISTS hr SMALLINT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS era_last5 FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS whip_last5 FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS k_per_9_last5 FLOAT;"),
@@ -250,6 +252,7 @@ def fetch_witt_game_logs(player_id, seasons):
                 "home_away":  "home" if game.get("isHome", False) else "away",
                 "pa":         game["stat"].get("plateAppearances", None),
                 "h":          game["stat"].get("hits", None),
+                "hr":         game["stat"].get("homeRuns", None),
                 "tb":         game["stat"].get("totalBases", None),
                 "sb":         game["stat"].get("stolenBases", None),
                 "cs":         game["stat"].get("caughtStealing", None),
