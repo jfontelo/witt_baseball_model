@@ -1,41 +1,50 @@
-### data_collection.py - Fetch & Store Witt Game Logs + Opposing Pitcher Stats
+### data_collection.py - Fetch & Store Player Game Logs + Opposing Pitcher Stats
+# Refactored to be player-agnostic — supports Witt, Schwarber, and future players
+# All player-specific data keyed by player_id, not player name
+
 import subprocess
 
-# Ensure required packages are installed
 try:
     import requests
 except ModuleNotFoundError:
-    print("⚠️ requests not found. Installing...")
     subprocess.run(["pip", "install", "requests"], check=True)
     import requests
 
 try:
     import pandas as pd
 except ModuleNotFoundError:
-    print("⚠️ pandas not found. Installing...")
     subprocess.run(["pip", "install", "pandas"], check=True)
     import pandas as pd
 
 try:
     import sqlalchemy
 except ModuleNotFoundError:
-    print("⚠️ sqlalchemy not found. Installing...")
     subprocess.run(["pip", "install", "sqlalchemy"], check=True)
     import sqlalchemy
 
 try:
     import psycopg2
 except ModuleNotFoundError:
-    print("⚠️ psycopg2 not found. Installing...")
     subprocess.run(["pip", "install", "psycopg2-binary"], check=True)
     import psycopg2
 
 from sqlalchemy import create_engine, MetaData, Table, text
 from sqlalchemy.dialects.postgresql import insert
 from config import DATABASE_URL
+from datetime import datetime
 
-# Connect to PostgreSQL
 engine = create_engine(DATABASE_URL)
+
+
+# ─────────────────────────────────────────────
+# PLAYERS
+# Add new players here — player_id from MLB Stats API
+# ─────────────────────────────────────────────
+
+PLAYERS = {
+    677951: {"name": "Bobby Witt Jr.",   "team_id": 118, "bats": "R"},
+    # 656941: {"name": "Kyle Schwarber",   "team_id": 143, "bats": "L"},  # uncomment when ready
+}
 
 
 # ─────────────────────────────────────────────
@@ -76,19 +85,6 @@ PARK_FACTORS = {
 }
 
 
-def get_park_factor(opponent_id, home_away):
-    team_id = 118 if home_away == "home" else opponent_id
-    factors = PARK_FACTORS.get(team_id, ("Unknown", 100, 100, 100, 100, 100))
-    return {
-        "park_name":      factors[0],
-        "park_factor":    factors[1],
-        "park_factor_1b": factors[2],
-        "park_factor_2b": factors[3],
-        "park_factor_3b": factors[4],
-        "park_factor_hr": factors[5],
-    }
-
-
 # ─────────────────────────────────────────────
 # UPSERT HELPER
 # ─────────────────────────────────────────────
@@ -97,16 +93,13 @@ def upsert_table(df, table_name, unique_columns):
     with engine.connect() as conn:
         metadata = MetaData()
         table = Table(table_name, metadata, autoload_with=engine)
-
         records = df.to_dict(orient="records")
         stmt = insert(table).values(records)
-
         update_columns = {col.name: col for col in table.columns if col.name not in unique_columns}
         upsert_stmt = stmt.on_conflict_do_update(
             index_elements=unique_columns,
             set_=update_columns
         )
-
         conn.execute(upsert_stmt)
         conn.commit()
 
@@ -116,13 +109,13 @@ def upsert_table(df, table_name, unique_columns):
 # ─────────────────────────────────────────────
 
 def create_tables():
-    """Create necessary tables if they don't exist."""
     create_statements = [
         text("""
-        CREATE TABLE IF NOT EXISTS witt_game_logs (
+        CREATE TABLE IF NOT EXISTS player_game_logs (
             game_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
             date DATE,
-            team TEXT NOT NULL,
+            team TEXT,
             season INTEGER,
             opponent TEXT,
             opponent_id INTEGER,
@@ -137,7 +130,7 @@ def create_tables():
             so SMALLINT,
             rbi SMALLINT,
             ops TEXT,
-            UNIQUE (game_id, team)
+            UNIQUE (game_id, player_id)
         );
         """),
         text("""
@@ -156,6 +149,7 @@ def create_tables():
             k_per_9_last5 FLOAT,
             era_vs_rhb FLOAT,
             whip_vs_rhb FLOAT,
+            is_first_time_opponent BOOLEAN DEFAULT FALSE,
             UNIQUE (game_id)
         );
         """),
@@ -183,21 +177,35 @@ def create_tables():
         """),
     ]
 
-    # Migrate existing tables if new columns are missing
+    # Migrations — add new columns and migrate old witt_game_logs if it exists
     migrate_statements = [
-        text("ALTER TABLE witt_game_logs ADD COLUMN IF NOT EXISTS hr SMALLINT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS era_last5 FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS whip_last5 FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS k_per_9_last5 FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS era_vs_rhb FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS whip_vs_rhb FLOAT;"),
+        text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS is_first_time_opponent BOOLEAN DEFAULT FALSE;"),
+        # Migrate old witt_game_logs into player_game_logs if it exists
+        text("""
+        INSERT INTO player_game_logs (
+            game_id, player_id, date, team, season, opponent,
+            opponent_id, home_away, pa, h, hr, tb, sb, cs, bb, so, rbi, ops
+        )
+        SELECT game_id, 677951, date, team, season, opponent,
+               opponent_id, home_away, pa, h, hr, tb, sb, cs, bb, so, rbi, ops
+        FROM witt_game_logs
+        ON CONFLICT (game_id, player_id) DO NOTHING;
+        """),
     ]
 
     with engine.connect() as conn:
         for statement in create_statements:
             conn.execute(statement)
         for statement in migrate_statements:
-            conn.execute(statement)
+            try:
+                conn.execute(statement)
+            except Exception:
+                pass  # migration may already be done or old table may not exist
         conn.commit()
 
 create_tables()
@@ -217,12 +225,13 @@ def parse_innings(ip_str):
 
 
 # ─────────────────────────────────────────────
-# FETCH WITT GAME LOGS
+# FETCH PLAYER GAME LOGS
+# Player-agnostic — pass any MLB player_id
 # ─────────────────────────────────────────────
 
-def fetch_witt_game_logs(player_id, seasons):
-    """Fetch Bobby Witt Jr.'s per-game hitting stats for the given seasons."""
-    witt_game_logs = []
+def fetch_player_game_logs(player_id, seasons):
+    """Fetch per-game hitting stats for any player across given seasons."""
+    game_logs = []
 
     for season in seasons:
         try:
@@ -234,44 +243,44 @@ def fetch_witt_game_logs(player_id, seasons):
             response.raise_for_status()
             data = response.json()
         except requests.exceptions.RequestException as e:
-            print(f"⚠️ API request failed for Witt's logs in {season}: {e}")
+            print(f"⚠️ API request failed for player {player_id} in {season}: {e}")
             continue
 
         if "stats" not in data or not data["stats"]:
-            print(f"⚠️ No game logs available for Witt in {season}. Skipping.")
+            print(f"⚠️ No game logs for player {player_id} in {season}. Skipping.")
             continue
 
         for game in data["stats"][0]["splits"]:
-            witt_game_logs.append({
-                "game_id":    game["game"].get("gamePk", None),
-                "date":       game.get("date", None),
-                "team":       game["team"]["name"],
-                "opponent":   game.get("opponent", {}).get("name", None),
+            game_logs.append({
+                "game_id":     game["game"].get("gamePk", None),
+                "player_id":   player_id,
+                "date":        game.get("date", None),
+                "team":        game["team"]["name"],
+                "opponent":    game.get("opponent", {}).get("name", None),
                 "opponent_id": game.get("opponent", {}).get("id", None),
-                "season":     season,
-                "home_away":  "home" if game.get("isHome", False) else "away",
-                "pa":         game["stat"].get("plateAppearances", None),
-                "h":          game["stat"].get("hits", None),
-                "hr":         game["stat"].get("homeRuns", None),
-                "tb":         game["stat"].get("totalBases", None),
-                "sb":         game["stat"].get("stolenBases", None),
-                "cs":         game["stat"].get("caughtStealing", None),
-                "bb":         game["stat"].get("baseOnBalls", None),
-                "so":         game["stat"].get("strikeOuts", None),
-                "rbi":        game["stat"].get("rbi", None),
-                "ops":        game["stat"].get("ops", None),
+                "season":      season,
+                "home_away":   "home" if game.get("isHome", False) else "away",
+                "pa":          game["stat"].get("plateAppearances", None),
+                "h":           game["stat"].get("hits", None),
+                "hr":          game["stat"].get("homeRuns", None),
+                "tb":          game["stat"].get("totalBases", None),
+                "sb":          game["stat"].get("stolenBases", None),
+                "cs":          game["stat"].get("caughtStealing", None),
+                "bb":          game["stat"].get("baseOnBalls", None),
+                "so":          game["stat"].get("strikeOuts", None),
+                "rbi":         game["stat"].get("rbi", None),
+                "ops":         game["stat"].get("ops", None),
             })
 
-    return pd.DataFrame(witt_game_logs)
+    return pd.DataFrame(game_logs)
 
 
 # ─────────────────────────────────────────────
 # OPPOSING PITCHER LOOKUP
 # ─────────────────────────────────────────────
 
-royals_team_id = 118
-
-def get_opposing_starting_pitcher(game_id):
+def get_opposing_starting_pitcher(game_id, player_team_id):
+    """Look up the opposing starting pitcher for a given game."""
     try:
         url = f"https://statsapi.mlb.com/api/v1/game/{game_id}/boxscore"
         response = requests.get(url)
@@ -285,7 +294,7 @@ def get_opposing_starting_pitcher(game_id):
     for side in ["away", "home"]:
         team_info = teams.get(side, {})
         team_id = team_info.get("team", {}).get("id")
-        if team_id != royals_team_id:
+        if team_id != player_team_id:
             pitchers = team_info.get("pitchers", [])
             if pitchers:
                 starter_id = pitchers[0]
@@ -302,18 +311,11 @@ def get_opposing_starting_pitcher(game_id):
 
 # ─────────────────────────────────────────────
 # PITCHER SEASON STATS
-# Includes: cumulative ERA/WHIP/K9, last 5 starts, vs RHB splits
+# Cumulative ERA/WHIP/K9, last 5 starts, vs RHB splits
 # ─────────────────────────────────────────────
 
 def get_pitcher_season_stats(pitcher_id, season, before_date):
-    """
-    Compute a pitcher's stats entering a specific game:
-      - Cumulative season ERA, WHIP, K/9
-      - Last 5 starts ERA, WHIP, K/9  (recent form)
-      - vs RHB ERA, WHIP  (from statSplits — Witt bats right)
-
-    Falls back to league averages for missing data.
-    """
+    """Compute a pitcher's stats entering a specific game."""
     LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8}
 
     try:
@@ -342,13 +344,11 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         print(f"⚠️ Pitcher fetch failed for {pitcher_id}, {season}: {e}")
         return None
 
-    # Handedness
     throws = None
     people = bio_data.get("people", [])
     if people:
         throws = people[0].get("pitchHand", {}).get("code")
 
-    # Filter game log to games before target date (starters only: IP >= 1)
     all_splits = (
         gamelog_data.get("stats", [{}])[0].get("splits", [])
         if gamelog_data.get("stats") else []
@@ -371,7 +371,6 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
             "whip_vs_rhb": LEAGUE_AVG["whip"],
         }
 
-    # ── Cumulative season stats ──
     def accumulate(games):
         er, inn, h, bb, k = 0, 0.0, 0, 0, 0
         for g in games:
@@ -391,7 +390,6 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         whip = round((h + bb) / inn, 2)
         k9   = round((k / inn) * 9, 2)
 
-    # ── Last 5 starts ──
     last5 = prior_games[-5:]
     er5, inn5, h5, bb5, k5 = accumulate(last5)
     if inn5 == 0:
@@ -401,7 +399,6 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         whip5 = round((h5 + bb5) / inn5, 2)
         k9_5  = round((k5 / inn5) * 9, 2)
 
-    # ── vs RHB splits (sitCode 'vr' = vs right-handed batters) ──
     rhb_splits = splits_data.get("stats", [{}])[0].get("splits", []) if splits_data.get("stats") else []
     era_vs_rhb  = LEAGUE_AVG["era"]
     whip_vs_rhb = LEAGUE_AVG["whip"]
@@ -410,11 +407,8 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         s = rhb_splits[0].get("stat", {})
         rhb_ip = parse_innings(s.get("inningsPitched", "0"))
         if rhb_ip > 0:
-            rhb_er  = s.get("earnedRuns", 0)
-            rhb_h   = s.get("hits", 0)
-            rhb_bb  = s.get("baseOnBalls", 0)
-            era_vs_rhb  = round((rhb_er / rhb_ip) * 9, 2)
-            whip_vs_rhb = round((rhb_h + rhb_bb) / rhb_ip, 2)
+            era_vs_rhb  = round((s.get("earnedRuns", 0) / rhb_ip) * 9, 2)
+            whip_vs_rhb = round((s.get("hits", 0) + s.get("baseOnBalls", 0)) / rhb_ip, 2)
 
     return {
         "throws":        throws,
@@ -430,25 +424,169 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
 
 
 # ─────────────────────────────────────────────
+# PITCHER LAZY LOADER
+# Called from predict.py — gets clean season stats
+# for any pitcher regardless of whether Witt has faced them
+# ─────────────────────────────────────────────
+
+def get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, season):
+    """
+    Lazy loader for pitcher season stats.
+
+    Logic:
+    1. Check pitcher_game_logs for this season — need >= 5 starts for reliable stats
+    2. If not enough current season data, check prior season
+    3. If neither has enough data, fetch directly from MLB Stats API
+       using full season cumulative stats (not game-by-game which is noisy early)
+    4. Cache result in pitcher_game_logs for future use
+
+    This solves the early season problem where ERA 18.0 from one bad start
+    corrupts predictions for pitchers Witt hasn't faced much.
+    """
+    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8}
+    MIN_STARTS = 5
+
+    # ── Check DB for current and prior season ──
+    with engine.connect() as conn:
+        result = pd.read_sql(text("""
+            SELECT era, whip, k_per_9, era_last5, whip_last5,
+                   era_vs_rhb, throws, season, date
+            FROM pitcher_game_logs
+            WHERE pitcher_id = :pid
+            ORDER BY date DESC
+        """), conn, params={"pid": pitcher_id})
+
+    if not result.empty:
+        current = result[result["season"] == season]
+        prior   = result[result["season"] == season - 1]
+
+        if len(current) >= MIN_STARTS:
+            row = current.iloc[0]
+            print(f"  Using {season} DB stats ({len(current)} appearances)")
+            return _row_to_stats(row)
+
+        if len(prior) >= MIN_STARTS:
+            row = prior.iloc[0]
+            print(f"  ⚠️ Only {len(current)} start(s) in {season} — using {season-1} DB stats")
+            return _row_to_stats(row)
+
+    # ── Not enough DB data — fetch full season from API ──
+    print(f"  Fetching {season} season stats from MLB API for {pitcher_name}...")
+    try:
+        stats_url = (
+            f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+            f"?stats=season&group=pitching&season={season}"
+        )
+        stats_resp = requests.get(stats_url)
+        stats_resp.raise_for_status()
+        stats_data = stats_resp.json()
+
+        splits_url = (
+            f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+            f"?stats=statSplits&group=pitching&season={season}&sitCodes=vr"
+        )
+        splits_resp = requests.get(splits_url)
+        splits_resp.raise_for_status()
+        splits_data = splits_resp.json()
+
+        bio_url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}"
+        bio_resp = requests.get(bio_url)
+        bio_resp.raise_for_status()
+        bio_data = bio_resp.json()
+
+    except requests.exceptions.RequestException as e:
+        print(f"  ⚠️ API fetch failed: {e}. Using league averages.")
+        return {**LEAGUE_AVG, "era_last5": LEAGUE_AVG["era"],
+                "era_vs_rhb": LEAGUE_AVG["era"], "pitcher_r": 1}
+
+    # Handedness
+    throws = None
+    people = bio_data.get("people", [])
+    if people:
+        throws = people[0].get("pitchHand", {}).get("code")
+
+    # Season cumulative stats
+    season_splits = (
+        stats_data.get("stats", [{}])[0].get("splits", [])
+        if stats_data.get("stats") else []
+    )
+
+    if not season_splits:
+        # Try prior season from API
+        print(f"  No {season} MLB stats found. Trying {season-1}...")
+        try:
+            prev_url = (
+                f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+                f"?stats=season&group=pitching&season={season-1}"
+            )
+            prev_resp = requests.get(prev_url)
+            prev_resp.raise_for_status()
+            prev_data = prev_resp.json()
+            season_splits = (
+                prev_data.get("stats", [{}])[0].get("splits", [])
+                if prev_data.get("stats") else []
+            )
+        except Exception:
+            pass
+
+    if not season_splits:
+        print(f"  ⚠️ No stats found. Using league averages.")
+        return {**LEAGUE_AVG, "era_last5": LEAGUE_AVG["era"],
+                "era_vs_rhb": LEAGUE_AVG["era"], "pitcher_r": int(throws == "R") if throws else 1}
+
+    s   = season_splits[0].get("stat", {})
+    inn = parse_innings(s.get("inningsPitched", "0"))
+
+    if inn < 5:
+        print(f"  ⚠️ Only {inn:.1f} IP found. Using league averages.")
+        return {**LEAGUE_AVG, "era_last5": LEAGUE_AVG["era"],
+                "era_vs_rhb": LEAGUE_AVG["era"], "pitcher_r": int(throws == "R") if throws else 1}
+
+    era  = round((s.get("earnedRuns", 0) / inn) * 9, 2)
+    whip = round((s.get("hits", 0) + s.get("baseOnBalls", 0)) / inn, 2)
+    k9   = round((s.get("strikeOuts", 0) / inn) * 9, 2)
+
+    # vs RHB
+    rhb = splits_data.get("stats", [{}])[0].get("splits", []) if splits_data.get("stats") else []
+    era_vs_rhb = LEAGUE_AVG["era"]
+    if rhb:
+        rs     = rhb[0].get("stat", {})
+        rhb_ip = parse_innings(rs.get("inningsPitched", "0"))
+        if rhb_ip > 0:
+            era_vs_rhb = round((rs.get("earnedRuns", 0) / rhb_ip) * 9, 2)
+
+    print(f"  ✅ ERA {era}, WHIP {whip}, K/9 {k9} ({inn:.1f} IP)")
+
+    return {
+        "era":        era,
+        "whip":       whip,
+        "k_per_9":    k9,
+        "era_last5":  era,
+        "era_vs_rhb": era_vs_rhb,
+        "pitcher_r":  int(throws == "R") if throws else 1,
+    }
+
+
+def _row_to_stats(row):
+    """Convert a pitcher_game_logs DB row to the stats dict predict.py expects."""
+    return {
+        "era":        row["era"],
+        "whip":       row["whip"],
+        "k_per_9":    row["k_per_9"],
+        "era_last5":  row["era_last5"] if pd.notna(row["era_last5"]) else row["era"],
+        "era_vs_rhb": row["era_vs_rhb"] if pd.notna(row["era_vs_rhb"]) else row["era"],
+        "pitcher_r":  1 if row["throws"] == "R" else 0,
+    }
+
+
+# ─────────────────────────────────────────────
 # BULLPEN STATS
-# Opponent team relief ERA/WHIP/K9 entering each game
 # ─────────────────────────────────────────────
 
 def get_bullpen_stats(opponent_id, season, before_date):
-    """
-    Fetch opponent team's cumulative bullpen ERA, WHIP, K/9 entering a game.
-    Uses team pitching game logs and excludes games on or after before_date.
-    Falls back to league averages if unavailable.
-    """
     LEAGUE_BP = {"bullpen_era": 4.10, "bullpen_whip": 1.28, "bullpen_k_per_9": 9.2}
 
     try:
-        url = (
-            f"https://statsapi.mlb.com/api/v1/teams/{opponent_id}/stats"
-            f"?stats=byDayOfWeek&group=pitching&season={season}"
-        )
-        # Note: we use the season-level relief stats as a proxy
-        # A more precise approach would be to sum individual reliever game logs
         team_url = (
             f"https://statsapi.mlb.com/api/v1/teams/{opponent_id}/stats"
             f"?stats=season&group=pitching&season={season}&playerPool=qualifier"
@@ -460,8 +598,6 @@ def get_bullpen_stats(opponent_id, season, before_date):
         print(f"⚠️ Bullpen fetch failed for team {opponent_id}, {season}: {e}")
         return LEAGUE_BP
 
-    # Extract team-level pitching stats as bullpen proxy
-    # We use season team totals; a future improvement would filter to relievers only
     splits = data.get("stats", [{}])[0].get("splits", []) if data.get("stats") else []
     if not splits:
         return LEAGUE_BP
@@ -471,40 +607,45 @@ def get_bullpen_stats(opponent_id, season, before_date):
     if inn == 0:
         return LEAGUE_BP
 
-    er  = s.get("earnedRuns", 0)
-    h   = s.get("hits", 0)
-    bb  = s.get("baseOnBalls", 0)
-    k   = s.get("strikeOuts", 0)
-
     return {
-        "bullpen_era":     round((er / inn) * 9, 2),
-        "bullpen_whip":    round((h + bb) / inn, 2),
-        "bullpen_k_per_9": round((k / inn) * 9, 2),
+        "bullpen_era":     round((s.get("earnedRuns", 0) / inn) * 9, 2),
+        "bullpen_whip":    round((s.get("hits", 0) + s.get("baseOnBalls", 0)) / inn, 2),
+        "bullpen_k_per_9": round((s.get("strikeOuts", 0) / inn) * 9, 2),
     }
 
 
 # ─────────────────────────────────────────────
 # FETCH PITCHER GAME LOGS
+# Tracks is_first_time_opponent per player
 # ─────────────────────────────────────────────
 
-def fetch_pitcher_game_logs(witt_df):
+def fetch_pitcher_game_logs(player_df, player_id):
     """
-    For each game in Witt's game log, look up the opposing starting pitcher
-    and their season stats (cumulative, last 5 starts, vs RHB).
-    """
-    pitcher_rows = []
-    seen_game_ids = set()
+    For each game in a player's game log, look up the opposing starting pitcher
+    and their season stats.
 
-    for _, row in witt_df.iterrows():
-        game_id    = row["game_id"]
-        season     = row["season"]
-        date       = row["date"]
+    is_first_time_opponent = True when this pitcher appears for the first time
+    in this player's history. Useful for debugging and potential future feature.
+    """
+    player_info    = PLAYERS.get(player_id, {})
+    player_team_id = player_info.get("team_id", 118)
+
+    seen_pitcher_ids = set()
+    pitcher_rows     = []
+    seen_game_ids    = set()
+
+    player_df_sorted = player_df.sort_values("date").reset_index(drop=True)
+
+    for _, row in player_df_sorted.iterrows():
+        game_id = row["game_id"]
+        season  = row["season"]
+        date    = row["date"]
 
         if game_id in seen_game_ids or pd.isna(game_id):
             continue
         seen_game_ids.add(game_id)
 
-        pitcher_info = get_opposing_starting_pitcher(int(game_id))
+        pitcher_info = get_opposing_starting_pitcher(int(game_id), player_team_id)
         if not pitcher_info:
             print(f"⚠️ Could not identify starting pitcher for game {game_id}. Skipping.")
             continue
@@ -512,43 +653,151 @@ def fetch_pitcher_game_logs(witt_df):
         pitcher_id   = pitcher_info["pitcher_id"]
         pitcher_name = pitcher_info["pitcher_name"]
 
+        is_first_time = pitcher_id not in seen_pitcher_ids
+        seen_pitcher_ids.add(pitcher_id)
+
         stats = get_pitcher_season_stats(pitcher_id, season, before_date=str(date))
         if not stats:
             continue
 
         pitcher_rows.append({
-            "game_id":        int(game_id),
-            "date":           date,
-            "season":         season,
-            "pitcher_id":     pitcher_id,
-            "pitcher_name":   pitcher_name,
-            "throws":         stats["throws"],
-            "era":            stats["era"],
-            "whip":           stats["whip"],
-            "k_per_9":        stats["k_per_9"],
-            "era_last5":      stats["era_last5"],
-            "whip_last5":     stats["whip_last5"],
-            "k_per_9_last5":  stats["k_per_9_last5"],
-            "era_vs_rhb":     stats["era_vs_rhb"],
-            "whip_vs_rhb":    stats["whip_vs_rhb"],
+            "game_id":                int(game_id),
+            "date":                   date,
+            "season":                 season,
+            "pitcher_id":             pitcher_id,
+            "pitcher_name":           pitcher_name,
+            "throws":                 stats["throws"],
+            "era":                    stats["era"],
+            "whip":                   stats["whip"],
+            "k_per_9":                stats["k_per_9"],
+            "era_last5":              stats["era_last5"],
+            "whip_last5":             stats["whip_last5"],
+            "k_per_9_last5":          stats["k_per_9_last5"],
+            "era_vs_rhb":             stats["era_vs_rhb"],
+            "whip_vs_rhb":            stats["whip_vs_rhb"],
+            "is_first_time_opponent": is_first_time,
         })
 
     return pd.DataFrame(pitcher_rows)
 
 
 # ─────────────────────────────────────────────
+# FETCH TODAY'S PITCHER
+# Proactively pulls tonight's opponent starter stats
+# even if the player has never faced them before
+# ─────────────────────────────────────────────
+
+def fetch_todays_pitcher(player_id, game_date=None):
+    """
+    Look up tonight's scheduled game, identify the opposing starter,
+    and pull their current season stats if not already in pitcher_game_logs.
+
+    Handles doubleheaders by processing all games on the date.
+    Sets is_first_time_opponent = True for pitchers never seen before.
+    """
+    player_info    = PLAYERS.get(player_id, {})
+    player_team_id = player_info.get("team_id")
+    season         = datetime.today().year
+    date_str       = game_date or datetime.today().strftime('%Y-%m-%d')
+
+    if not player_team_id:
+        print(f"⚠️ Player {player_id} not in PLAYERS dict.")
+        return
+
+    try:
+        schedule_url = (
+            f"https://statsapi.mlb.com/api/v1/schedule"
+            f"?sportId=1&teamId={player_team_id}&date={date_str}"
+        )
+        response = requests.get(schedule_url)
+        response.raise_for_status()
+        data = response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Schedule fetch failed: {e}")
+        return
+
+    dates = data.get("dates", [])
+    if not dates:
+        print(f"  No games scheduled for team {player_team_id} on {date_str}")
+        return
+
+    for game in dates[0].get("games", []):
+        game_id = game.get("gamePk")
+        if not game_id:
+            continue
+
+        with engine.connect() as conn:
+            existing = pd.read_sql(text("""
+                SELECT game_id FROM pitcher_game_logs WHERE game_id = :gid
+            """), conn, params={"gid": game_id})
+
+        if not existing.empty:
+            print(f"  Pitcher data already exists for game {game_id}. Skipping.")
+            continue
+
+        teams = game.get("teams", {})
+        for side in ["away", "home"]:
+            team_data = teams.get(side, {})
+            if team_data.get("team", {}).get("id") != player_team_id:
+                probable     = team_data.get("probablePitcher", {})
+                pitcher_id   = probable.get("id")
+                pitcher_name = probable.get("fullName", "Unknown")
+
+                if not pitcher_id:
+                    print(f"  No probable pitcher listed for game {game_id} yet.")
+                    continue
+
+                print(f"  Tonight's pitcher: {pitcher_name} (id: {pitcher_id})")
+
+                with engine.connect() as conn:
+                    prior = pd.read_sql(text("""
+                        SELECT COUNT(*) as n FROM pitcher_game_logs
+                        WHERE pitcher_id = :pid
+                    """), conn, params={"pid": pitcher_id})
+
+                is_first_time = prior.iloc[0]["n"] == 0
+
+                if is_first_time:
+                    print(f"  First time opponent — fetching {season} season stats...")
+                else:
+                    print(f"  Known pitcher — fetching current season stats...")
+
+                stats = get_pitcher_season_stats(pitcher_id, season, before_date=date_str)
+                if not stats:
+                    return
+
+                row = {
+                    "game_id":                game_id,
+                    "date":                   date_str,
+                    "season":                 season,
+                    "pitcher_id":             pitcher_id,
+                    "pitcher_name":           pitcher_name,
+                    "throws":                 stats["throws"],
+                    "era":                    stats["era"],
+                    "whip":                   stats["whip"],
+                    "k_per_9":                stats["k_per_9"],
+                    "era_last5":              stats["era_last5"],
+                    "whip_last5":             stats["whip_last5"],
+                    "k_per_9_last5":          stats["k_per_9_last5"],
+                    "era_vs_rhb":             stats["era_vs_rhb"],
+                    "whip_vs_rhb":            stats["whip_vs_rhb"],
+                    "is_first_time_opponent": is_first_time,
+                }
+
+                df = pd.DataFrame([row])
+                upsert_table(df, "pitcher_game_logs", ["game_id"])
+                print(f"  ✅ Stored pitcher stats for {pitcher_name} (game {game_id})")
+
+
+# ─────────────────────────────────────────────
 # FETCH BULLPEN GAME LOGS
 # ─────────────────────────────────────────────
 
-def fetch_bullpen_game_logs(witt_df):
-    """
-    For each game in Witt's game log, fetch the opponent team's
-    bullpen ERA/WHIP/K9 entering that game.
-    """
-    bullpen_rows = []
+def fetch_bullpen_game_logs(player_df):
+    bullpen_rows  = []
     seen_game_ids = set()
 
-    for _, row in witt_df.iterrows():
+    for _, row in player_df.iterrows():
         game_id     = row["game_id"]
         season      = row["season"]
         date        = row["date"]
@@ -598,45 +847,45 @@ def upsert_park_factors():
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    player_id = 677951  # Bobby Witt Jr.
-    seasons = list(range(2022, pd.Timestamp.today().year))
+    seasons = list(range(2022, pd.Timestamp.today().year + 1))
 
-    # 1. Fetch and upsert Witt's game logs
-    print("Fetching Witt game logs...")
-    df_witt_game_logs = fetch_witt_game_logs(player_id, seasons)
-    df_witt_game_logs.columns = df_witt_game_logs.columns.str.lower().str.strip()
+    for player_id, player_info in PLAYERS.items():
+        player_name = player_info["name"]
+        print(f"\n{'='*50}")
+        print(f"Processing {player_name} (id: {player_id})")
+        print(f"{'='*50}")
 
-    with engine.connect() as conn:
-        witt_columns = [
-            row[0] for row in conn.execute(
-                text("SELECT column_name FROM information_schema.columns WHERE table_name = 'witt_game_logs'")
-            )
-        ]
-    df_witt_game_logs = df_witt_game_logs.reindex(columns=witt_columns, fill_value=None)
+        # 1. Fetch and upsert player game logs
+        print(f"Fetching game logs...")
+        df_game_logs = fetch_player_game_logs(player_id, seasons)
 
-    if not df_witt_game_logs.empty:
-        upsert_table(df_witt_game_logs, "witt_game_logs", ["game_id", "team"])
-        print("✅ witt_game_logs upserted successfully!")
+        if not df_game_logs.empty:
+            upsert_table(df_game_logs, "player_game_logs", ["game_id", "player_id"])
+            print(f"✅ player_game_logs upserted for {player_name}!")
 
-    # 2. Fetch and upsert opposing pitcher stats
-    print("Fetching opposing pitcher stats...")
-    df_pitcher_game_logs = fetch_pitcher_game_logs(df_witt_game_logs)
+        # 2. Fetch and upsert opposing pitcher stats
+        print(f"Fetching opposing pitcher stats...")
+        df_pitchers = fetch_pitcher_game_logs(df_game_logs, player_id)
 
-    if not df_pitcher_game_logs.empty:
-        upsert_table(df_pitcher_game_logs, "pitcher_game_logs", ["game_id"])
-        print("✅ pitcher_game_logs upserted successfully!")
+        if not df_pitchers.empty:
+            upsert_table(df_pitchers, "pitcher_game_logs", ["game_id"])
+            print(f"✅ pitcher_game_logs upserted!")
 
-    # 3. Fetch and upsert bullpen stats
-    print("Fetching bullpen stats...")
-    df_bullpen = fetch_bullpen_game_logs(df_witt_game_logs)
+        # 3. Fetch and upsert bullpen stats
+        print(f"Fetching bullpen stats...")
+        df_bullpen = fetch_bullpen_game_logs(df_game_logs)
 
-    if not df_bullpen.empty:
-        upsert_table(df_bullpen, "bullpen_stats", ["game_id"])
-        print("✅ bullpen_stats upserted successfully!")
+        if not df_bullpen.empty:
+            upsert_table(df_bullpen, "bullpen_stats", ["game_id"])
+            print(f"✅ bullpen_stats upserted!")
 
-    # 4. Upsert park factors
-    print("Upserting park factors...")
+        # 4. Proactively fetch tonight's pitcher
+        print(f"Fetching today's pitcher...")
+        fetch_todays_pitcher(player_id)
+
+    # 5. Upsert park factors (shared across all players)
+    print(f"\nUpserting park factors...")
     upsert_park_factors()
-    print("✅ park_factors upserted successfully!")
+    print(f"✅ park_factors upserted!")
 
-    print("🚀 Data collection complete and stored in PostgreSQL!")
+    print(f"\n🚀 Data collection complete!")
