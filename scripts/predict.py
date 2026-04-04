@@ -19,17 +19,25 @@ from sqlalchemy import text
 # LOAD MODEL
 # ─────────────────────────────────────────────
 
-model  = joblib.load("models/witt_hr_logistic_model.pkl")
-scaler = joblib.load("models/witt_hr_logistic_scaler.pkl")
+model  = joblib.load("models/witt_hr_logistic_v7_model.pkl")
+scaler = joblib.load("models/witt_hr_logistic_v7_scaler.pkl")
 
 FEATURES = [
-    'hr_lag1', 'hr_avg_7', 'hr_avg_15',
-    'avg_exit_velo_7', 'avg_exit_velo_15',
-    'barrel_rate_7', 'barrel_rate_15', 'hard_hit_rate_7',
-    'is_home', 'pitcher_r',
-    'era', 'whip', 'k_per_9', 'era_last5', 'era_vs_rhb',
+    'avg_exit_velo_15',
+    'barrel_rate_15',
+    'hard_hit_rate_15',
+    'hr_zone_rate_15',    # % batted balls in 25-35 degree launch angle band
+    'is_home',
+    'pitcher_r',
+    'days_rest',          # 0 = back-to-back, capped at 4
+    'era',
+    'whip',
+    'k_per_9',
+    'era_last5',
+    'era_vs_rhb',
+    'gb_rate',            # pitcher ground ball tendency
     'bullpen_era',
-    'park_factor', 'park_factor_hr',
+    'park_factor',
 ]
 
 WITT_ID = 677951
@@ -53,27 +61,34 @@ def american_odds_to_prob(odds):
 
 
 # ─────────────────────────────────────────────
-# WITT ROLLING FEATURES
+# DAYS REST
 # ─────────────────────────────────────────────
 
-def get_witt_rolling_features():
+def get_days_rest(game_date=None):
+    """
+    Compute how many rest days Witt has entering tonight's game.
+    game_date defaults to today. Capped at 4 — consistent with model training.
+    """
+    target = pd.to_datetime(game_date or datetime.today().strftime('%Y-%m-%d'))
+
     with engine.connect() as conn:
-        df = pd.read_sql(text("""
-            SELECT date, hr FROM player_game_logs
-            WHERE player_id = 677951
-            ORDER BY date DESC LIMIT 20
-        """), conn)
+        result = pd.read_sql(text("""
+            SELECT date FROM player_game_logs
+            WHERE player_id = 677951 AND date < :target
+            ORDER BY date DESC LIMIT 1
+        """), conn, params={"target": str(target.date())})
 
-    df = df.sort_values('date').reset_index(drop=True)
-    hr_lag1   = df['hr'].iloc[-1]
-    hr_avg_7  = df['hr'].tail(7).mean()
-    hr_avg_15 = df['hr'].tail(15).mean()
+    if result.empty:
+        print("  ⚠️ No prior games found. Using 1 day rest.")
+        return 1
 
-    print(f"  Last game HR:      {hr_lag1}")
-    print(f"  HR avg (7 games):  {hr_avg_7:.3f}")
-    print(f"  HR avg (15 games): {hr_avg_15:.3f}")
+    last_game = pd.to_datetime(result.iloc[0]['date'])
+    days = (target - last_game).days - 1
+    days = max(0, min(days, 4))  # clip 0-4
 
-    return hr_lag1, hr_avg_7, hr_avg_15
+    print(f"  Last game:   {last_game.date()}")
+    print(f"  Days rest:   {days}")
+    return days
 
 
 # ─────────────────────────────────────────────
@@ -82,39 +97,45 @@ def get_witt_rolling_features():
 
 def get_statcast_rolling_features():
     end_date   = datetime.today().strftime('%Y-%m-%d')
-    start_date = (datetime.today() - timedelta(days=60)).strftime('%Y-%m-%d')
+    start_date = (datetime.today() - timedelta(days=75)).strftime('%Y-%m-%d')
 
     print(f"  Pulling Statcast data ({start_date} to {end_date})...")
     raw = statcast_batter(start_date, end_date, player_id=WITT_ID)
 
     if raw.empty:
         print("  ⚠️ No Statcast data. Using league averages.")
-        return 88.0, 88.0, 0.08, 0.08, 0.35
+        return 88.0, 0.08, 0.35, 0.28
 
     batted = raw[raw['launch_speed'].notna()].copy()
+
+    # HR zone: 25-35 degree launch angle band
+    batted['in_hr_zone'] = batted['launch_angle'].between(25, 35).astype(int)
+
     game_stats = batted.groupby('game_date').agg(
         avg_exit_velo=('launch_speed', 'mean'),
         barrel_count=('launch_speed_angle', lambda x: (x == 6).sum()),
         hard_hit_count=('launch_speed', lambda x: (x >= 95).sum()),
+        hr_zone_count=('in_hr_zone', 'sum'),
         batted_balls=('launch_speed', 'count'),
     ).reset_index()
 
     game_stats['barrel_rate']   = game_stats['barrel_count']   / game_stats['batted_balls']
     game_stats['hard_hit_rate'] = game_stats['hard_hit_count'] / game_stats['batted_balls']
+    game_stats['hr_zone_rate']  = game_stats['hr_zone_count']  / game_stats['batted_balls']
     game_stats = game_stats.sort_values('game_date').reset_index(drop=True)
 
-    n    = len(game_stats)
-    ev7  = game_stats['avg_exit_velo'].tail(min(7,  n)).mean()
-    ev15 = game_stats['avg_exit_velo'].tail(min(15, n)).mean()
-    br7  = game_stats['barrel_rate'].tail(min(7,  n)).mean()
-    br15 = game_stats['barrel_rate'].tail(min(15, n)).mean()
-    hhr7 = game_stats['hard_hit_rate'].tail(min(7,  n)).mean()
+    n     = len(game_stats)
+    ev15  = game_stats['avg_exit_velo'].tail(min(15, n)).mean()
+    br15  = game_stats['barrel_rate'].tail(min(15, n)).mean()
+    hhr15 = game_stats['hard_hit_rate'].tail(min(15, n)).mean()
+    hrz15 = game_stats['hr_zone_rate'].tail(min(15, n)).mean()
 
-    print(f"  Avg exit velo (7):  {ev7:.1f} mph")
-    print(f"  Barrel rate (7):    {br7:.3f}")
-    print(f"  Hard hit rate (7):  {hhr7:.3f}")
+    print(f"  Avg exit velo (15):   {ev15:.1f} mph")
+    print(f"  Barrel rate (15):     {br15:.3f}")
+    print(f"  Hard hit rate (15):   {hhr15:.3f}")
+    print(f"  HR zone rate (15):    {hrz15:.3f}  (25-35 degree band)")
 
-    return ev7, ev15, br7, br15, hhr7
+    return ev15, br15, hhr15, hrz15
 
 
 # ─────────────────────────────────────────────
@@ -126,20 +147,19 @@ def get_park_factors(opponent_id, is_home):
 
     with engine.connect() as conn:
         result = pd.read_sql(text("""
-            SELECT park_name, park_factor, park_factor_hr
+            SELECT park_name, park_factor
             FROM park_factors WHERE team_id = :tid
         """), conn, params={"tid": team_id})
 
     if result.empty:
         print("  ⚠️ Park not found. Using league average.")
-        return 100, 100, "Unknown"
+        return 100, "Unknown"
 
     row = result.iloc[0]
     print(f"  Park:        {row['park_name']}")
     print(f"  Park factor: {row['park_factor']}")
-    print(f"  HR factor:   {row['park_factor_hr']}")
 
-    return row['park_factor'], row['park_factor_hr'], row['park_name']
+    return row['park_factor'], row['park_name']
 
 
 # ─────────────────────────────────────────────
@@ -160,22 +180,23 @@ def get_bullpen_era(opponent_id):
 # PREDICT
 # ─────────────────────────────────────────────
 
-def predict(pitcher_name, pitcher_id, opponent_id, is_home, book_odds=None):
+def predict(pitcher_name, pitcher_id, opponent_id, is_home, book_odds=None, game_date=None):
     """
     Run tonight's HR prediction for Witt.
 
-    pitcher_id: MLB player ID — find at mlb.com/player or baseball-reference.com
+    pitcher_id:  MLB player ID — find at mlb.com/player or baseball-reference.com
     opponent_id: team_id from park_factors (e.g. 158 = Brewers)
+    game_date:   optional override, defaults to today (YYYY-MM-DD)
     """
     print("\n" + "="*55)
     print("  BOBBY WITT JR. — HR PROP PREDICTION")
     print("="*55)
 
-    print("\n📊 Witt rolling HR form:")
-    hr_lag1, hr_avg_7, hr_avg_15 = get_witt_rolling_features()
+    print("\n📅 Rest:")
+    days_rest = get_days_rest(game_date)
 
-    print("\n⚡ Witt contact quality (Statcast):")
-    ev7, ev15, br7, br15, hhr7 = get_statcast_rolling_features()
+    print("\n⚡ Witt contact quality (Statcast, 15-day):")
+    ev15, br15, hhr15, hrz15 = get_statcast_rolling_features()
 
     print(f"\n⚾ Pitcher: {pitcher_name} (id: {pitcher_id})")
     pitcher = get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, datetime.today().year)
@@ -183,32 +204,30 @@ def predict(pitcher_name, pitcher_id, opponent_id, is_home, book_odds=None):
     print(f"  ERA:        {pitcher['era']}")
     print(f"  WHIP:       {pitcher['whip']}")
     print(f"  K/9:        {pitcher['k_per_9']}")
+    print(f"  GB rate:    {pitcher.get('gb_rate', 0.44):.3f}  ({'ground ball' if pitcher.get('gb_rate', 0.44) > 0.50 else 'fly ball'} pitcher)")
     print(f"  Throws:     {'R' if pitcher['pitcher_r'] else 'L'}")
 
     print(f"\n🏟️  Park ({'Home' if is_home else 'Away'}):")
-    park_factor, park_factor_hr, park_name = get_park_factors(opponent_id, is_home)
+    park_factor, park_name = get_park_factors(opponent_id, is_home)
 
     bullpen_era = get_bullpen_era(opponent_id)
 
     X = pd.DataFrame([{
-        'hr_lag1':          hr_lag1,
-        'hr_avg_7':         hr_avg_7,
-        'hr_avg_15':        hr_avg_15,
-        'avg_exit_velo_7':  ev7,
         'avg_exit_velo_15': ev15,
-        'barrel_rate_7':    br7,
         'barrel_rate_15':   br15,
-        'hard_hit_rate_7':  hhr7,
+        'hard_hit_rate_15': hhr15,
+        'hr_zone_rate_15':  hrz15,
         'is_home':          int(is_home),
         'pitcher_r':        pitcher['pitcher_r'],
+        'days_rest':        days_rest,
         'era':              pitcher['era'],
         'whip':             pitcher['whip'],
         'k_per_9':          pitcher['k_per_9'],
         'era_last5':        pitcher['era_last5'],
         'era_vs_rhb':       pitcher['era_vs_rhb'],
+        'gb_rate':          pitcher.get('gb_rate', 0.44),
         'bullpen_era':      bullpen_era,
         'park_factor':      park_factor,
-        'park_factor_hr':   park_factor_hr,
     }])
 
     X_scaled = scaler.transform(X[FEATURES])
@@ -240,16 +259,16 @@ def predict(pitcher_name, pitcher_id, opponent_id, is_home, book_odds=None):
 # ─────────────────────────────────────────────
 # RUN — fill in inputs before each game
 # Pitcher ID: look up at mlb.com/player
-# Opponent ID: from park_factors table (e.g. 158 = Brewers, 138 = Cardinals)
-# To get team ID, PSQL: SELECT team_id, park_name FROM park_factors ORDER BY park_name;
+# Opponent ID: from park_factors table
+# To get team IDs: SELECT team_id, park_name FROM park_factors ORDER BY park_name;
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    PITCHER_NAME = "Chad Patrick"       # e.g. "Chad Patrick"
-    PITCHER_ID   = 694477     # e.g. 694477
-    OPPONENT_ID  = 158     # e.g. 158
+    PITCHER_NAME = "Kyle Harrison"
+    PITCHER_ID   = 690986
+    OPPONENT_ID  = 158        # 158 = Brewers
     IS_HOME      = True
-    BOOK_ODDS    = +366     # e.g. +383
+    BOOK_ODDS    = +391
 
     if not PITCHER_NAME or not PITCHER_ID or not OPPONENT_ID:
         print("❌ Fill in PITCHER_NAME, PITCHER_ID, and OPPONENT_ID before running.")

@@ -90,12 +90,22 @@ PARK_FACTORS = {
 # ─────────────────────────────────────────────
 
 def upsert_table(df, table_name, unique_columns):
+    # Build upsert from DataFrame columns directly — avoids SQLAlchemy reflection
+    # caching stale schema and missing newly added columns like gb_rate
+    records = df.to_dict(orient="records")
+    if not records:
+        return
+
     with engine.connect() as conn:
         metadata = MetaData()
         table = Table(table_name, metadata, autoload_with=engine)
-        records = df.to_dict(orient="records")
         stmt = insert(table).values(records)
-        update_columns = {col.name: col for col in table.columns if col.name not in unique_columns}
+        # Build update set from DataFrame columns, not table reflection
+        update_columns = {
+            col: stmt.excluded[col]
+            for col in df.columns
+            if col not in unique_columns
+        }
         upsert_stmt = stmt.on_conflict_do_update(
             index_elements=unique_columns,
             set_=update_columns
@@ -149,6 +159,7 @@ def create_tables():
             k_per_9_last5 FLOAT,
             era_vs_rhb FLOAT,
             whip_vs_rhb FLOAT,
+            gb_rate FLOAT,
             is_first_time_opponent BOOLEAN DEFAULT FALSE,
             UNIQUE (game_id)
         );
@@ -185,6 +196,7 @@ def create_tables():
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS era_vs_rhb FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS whip_vs_rhb FLOAT;"),
         text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS is_first_time_opponent BOOLEAN DEFAULT FALSE;"),
+        text("ALTER TABLE pitcher_game_logs ADD COLUMN IF NOT EXISTS gb_rate FLOAT;"),
         # Migrate old witt_game_logs into player_game_logs if it exists
         text("""
         INSERT INTO player_game_logs (
@@ -316,7 +328,7 @@ def get_opposing_starting_pitcher(game_id, player_team_id):
 
 def get_pitcher_season_stats(pitcher_id, season, before_date):
     """Compute a pitcher's stats entering a specific game."""
-    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8}
+    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8, "gb_rate": 0.44}
 
     try:
         gamelog_url = (
@@ -369,10 +381,11 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
             "k_per_9_last5": LEAGUE_AVG["k_per_9"],
             "era_vs_rhb": LEAGUE_AVG["era"],
             "whip_vs_rhb": LEAGUE_AVG["whip"],
+            "gb_rate": LEAGUE_AVG["gb_rate"],
         }
 
     def accumulate(games):
-        er, inn, h, bb, k = 0, 0.0, 0, 0, 0
+        er, inn, h, bb, k, go, ao = 0, 0.0, 0, 0, 0, 0, 0
         for g in games:
             s = g.get("stat", {})
             inn += parse_innings(s.get("inningsPitched", "0"))
@@ -380,9 +393,11 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
             h   += s.get("hits", 0)
             bb  += s.get("baseOnBalls", 0)
             k   += s.get("strikeOuts", 0)
-        return er, inn, h, bb, k
+            go  += s.get("groundOuts", 0)
+            ao  += s.get("airOuts", 0)
+        return er, inn, h, bb, k, go, ao
 
-    er, inn, h, bb, k = accumulate(prior_games)
+    er, inn, h, bb, k, go, ao = accumulate(prior_games)
     if inn == 0:
         era, whip, k9 = LEAGUE_AVG["era"], LEAGUE_AVG["whip"], LEAGUE_AVG["k_per_9"]
     else:
@@ -390,8 +405,13 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         whip = round((h + bb) / inn, 2)
         k9   = round((k / inn) * 9, 2)
 
+    # GB rate = ground outs / (ground outs + air outs)
+    # Uses MLB Stats API groundOuts/flyOuts — directionally equivalent to FanGraphs GB%
+    total_batted = go + ao
+    gb_rate = round(go / total_batted, 3) if total_batted > 0 else LEAGUE_AVG["gb_rate"]
+
     last5 = prior_games[-5:]
-    er5, inn5, h5, bb5, k5 = accumulate(last5)
+    er5, inn5, h5, bb5, k5, _, _ = accumulate(last5)
     if inn5 == 0:
         era5, whip5, k9_5 = LEAGUE_AVG["era"], LEAGUE_AVG["whip"], LEAGUE_AVG["k_per_9"]
     else:
@@ -420,6 +440,7 @@ def get_pitcher_season_stats(pitcher_id, season, before_date):
         "k_per_9_last5": k9_5,
         "era_vs_rhb":    era_vs_rhb,
         "whip_vs_rhb":   whip_vs_rhb,
+        "gb_rate":       gb_rate,
     }
 
 
@@ -443,14 +464,14 @@ def get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, season):
     This solves the early season problem where ERA 18.0 from one bad start
     corrupts predictions for pitchers Witt hasn't faced much.
     """
-    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8}
+    LEAGUE_AVG = {"era": 4.20, "whip": 1.30, "k_per_9": 8.8, "gb_rate": 0.44}
     MIN_STARTS = 5
 
     # ── Check DB for current and prior season ──
     with engine.connect() as conn:
         result = pd.read_sql(text("""
             SELECT era, whip, k_per_9, era_last5, whip_last5,
-                   era_vs_rhb, throws, season, date
+                   era_vs_rhb, gb_rate, throws, season, date
             FROM pitcher_game_logs
             WHERE pitcher_id = :pid
             ORDER BY date DESC
@@ -546,6 +567,11 @@ def get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, season):
     whip = round((s.get("hits", 0) + s.get("baseOnBalls", 0)) / inn, 2)
     k9   = round((s.get("strikeOuts", 0) / inn) * 9, 2)
 
+    # GB rate from groundOuts/flyOuts — same source as get_pitcher_season_stats
+    go = s.get("groundOuts", 0)
+    ao = s.get("airOuts", 0)
+    gb_rate = round(go / (go + ao), 3) if (go + ao) > 0 else LEAGUE_AVG["gb_rate"]
+
     # vs RHB
     rhb = splits_data.get("stats", [{}])[0].get("splits", []) if splits_data.get("stats") else []
     era_vs_rhb = LEAGUE_AVG["era"]
@@ -555,7 +581,7 @@ def get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, season):
         if rhb_ip > 0:
             era_vs_rhb = round((rs.get("earnedRuns", 0) / rhb_ip) * 9, 2)
 
-    print(f"  ✅ ERA {era}, WHIP {whip}, K/9 {k9} ({inn:.1f} IP)")
+    print(f"  ✅ ERA {era}, WHIP {whip}, K/9 {k9}, GB% {gb_rate:.3f} ({inn:.1f} IP)")
 
     return {
         "era":        era,
@@ -563,6 +589,7 @@ def get_or_fetch_pitcher_season_stats(pitcher_name, pitcher_id, season):
         "k_per_9":    k9,
         "era_last5":  era,
         "era_vs_rhb": era_vs_rhb,
+        "gb_rate":    gb_rate,
         "pitcher_r":  int(throws == "R") if throws else 1,
     }
 
@@ -575,6 +602,7 @@ def _row_to_stats(row):
         "k_per_9":    row["k_per_9"],
         "era_last5":  row["era_last5"] if pd.notna(row["era_last5"]) else row["era"],
         "era_vs_rhb": row["era_vs_rhb"] if pd.notna(row["era_vs_rhb"]) else row["era"],
+        "gb_rate":    row["gb_rate"] if pd.notna(row["gb_rate"]) else 0.44,
         "pitcher_r":  1 if row["throws"] == "R" else 0,
     }
 
@@ -675,6 +703,7 @@ def fetch_pitcher_game_logs(player_df, player_id):
             "k_per_9_last5":          stats["k_per_9_last5"],
             "era_vs_rhb":             stats["era_vs_rhb"],
             "whip_vs_rhb":            stats["whip_vs_rhb"],
+            "gb_rate":                stats.get("gb_rate", 0.44),
             "is_first_time_opponent": is_first_time,
         })
 
@@ -781,6 +810,7 @@ def fetch_todays_pitcher(player_id, game_date=None):
                     "k_per_9_last5":          stats["k_per_9_last5"],
                     "era_vs_rhb":             stats["era_vs_rhb"],
                     "whip_vs_rhb":            stats["whip_vs_rhb"],
+                    "gb_rate":                stats.get("gb_rate", 0.44),
                     "is_first_time_opponent": is_first_time,
                 }
 
