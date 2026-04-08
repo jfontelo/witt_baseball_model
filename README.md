@@ -1,174 +1,109 @@
-# ⚾ Bobby Witt Jr. - Total Bases Prediction Model
+# Bobby Witt Jr. HR Prop Model
 
-A data engineering and predictive analytics project designed to find **+EV (positive expected value) betting opportunities** on DraftKings by modeling the probability distribution of Bobby Witt Jr.'s Total Bases (TB) in any given game.
-
-> This is V1 of a broader **player props modeling framework** - designed from the ground up to be extensible to other props (stolen bases, hits) and other players.
+A machine learning system for predicting Bobby Witt Jr.'s home run probability in MLB games, designed to identify value against sportsbook prop lines.
 
 ---
 
-## 🧠 Problem Statement
+## The Idea
 
-Sportsbooks like DraftKings price player prop lines based on their own models and market movement. Those lines aren't always accurate - and when they're off, there's a real edge to exploit.
-
-This project asks a simple question:
-
-> **Does DraftKings' implied probability for Bobby Witt Jr.'s TB match what the data actually suggests?**
-
-If our model says there's a 52% chance Witt hits 3+ TB, and DK is pricing that at +122 (implying ~45%), that's a quantifiable edge worth betting.
+Sportsbooks price player props based on broad market signals. For a small-market player like Witt, those lines may be less efficiently priced than for nationally followed stars. This model uses Statcast contact quality metrics -- exit velocity, barrel rate, hard hit rate -- combined with pitcher and park factors to generate an independent probability estimate. When that estimate diverges meaningfully from the sportsbook's implied probability, there may be edge.
 
 ---
 
-## 🎯 Why Bobby Witt Jr.?
+## Current Model
 
-Witt is a rare **5-tool player** - and 3 of those 5 tools directly affect his Total Bases distribution:
+**V7 -- Logistic Regression, HR Binary Classifier**
 
-- **Hit for average** → singles, staying alive at the plate
-- **Hit for power** → doubles and home runs
-- **Speed** → turns outs into singles, singles into doubles, singles into triples
+- **Target:** Did Witt hit at least one HR? (binary 0/1)
+- **CV AUC: 0.554** -- meaningful signal above the 0.55 threshold
+- **Top bin actual HR rate: 25.8%** vs bottom bin 7.3% -- real discrimination
+- **Calibration spread: 0.185** -- held flat from V6
 
-This creates a rich, spread-out probability distribution that is harder for sportsbooks to price accurately than a pure power hitter like Giancarlo Stanton (who is essentially HR or nothing). The more nuanced the distribution, the more opportunity for mispricing.
-
-Additionally, as a small-market player, Witt's prop lines receive less sharp betting action than players on marquee teams - meaning lines may sit mispriced longer.
-
----
-
-## 🎯 Approach
-
-Rather than predicting a single outcome ("he'll get 3 TB tonight"), we model a **full probability distribution** across all possible outcomes using Poisson regression - a statistical method well-suited for count-based outcomes like total bases.
-
-```
-TB = 0  →  8%
-TB = 1  → 18%
-TB = 2  → 25%
-TB = 3  → 24%   ← cumulative 3+ = 49%
-TB = 4  → 15%
-TB = 5+ → 10%
-```
-
-We then compare those probabilities directly to DraftKings' implied odds to identify mispriced lines.
+When the model places a game in the top bin, the sportsbook needs to offer better than +288 for edge to exist.
 
 ---
 
-## 📐 Model Features (V1)
+## How It Works
 
-The model is intentionally kept lean for V1 - fewer, high-signal features beat a noisy model with many weak ones.
+### Data Pipeline
 
-| Feature | Rationale |
-|---|---|
-| Witt's TB average (last 10–15 games) | Captures current form |
-| Tonight's starting pitcher ERA | Overall quality of opposing arm |
-| Tonight's starting pitcher WHIP | Measures how hittable the pitcher is |
-| Tonight's starting pitcher K/9 | High K/9 pitchers shift Witt's distribution toward more polarized outcomes |
-| Pitcher handedness (RHP/LHP) | Witt has meaningful platoon splits |
-| Home or Away | Witt's home/away performance differs |
-| Ballpark factor | Park-adjusted run environment |
+Game logs, pitcher stats, and park factors are pulled from the MLB Stats API and stored in PostgreSQL. Statcast pitch-level data (exit velocity, launch angle, barrel classification) is pulled via pybaseball and aggregated to game level. Pitcher season stats are fetched lazily -- only when a pitcher is scheduled to face Witt and not yet cached.
 
-> **Why not Witt vs. specific pitcher matchups?** Witt has been in the league since 2022. Individual matchup samples (sometimes 2–3 AB) are too small to be statistically meaningful. Pitcher-level aggregate stats are more reliable and always available.
+### Features
 
-> **Why K/9 matters:** A strikeout artist forces Witt to keep the barrel in the zone longer, making outcomes more polarized - more strikeouts but also more hard contact when he connects. A contact/ground ball pitcher allows Witt to use the whole field, where his speed creates singles and doubles. The pitcher type fundamentally shifts the shape of the distribution, not just the mean.
+- **Witt contact quality** -- rolling 7 and 15-game averages of exit velocity, barrel rate, hard hit rate
+- **Witt HR form** -- rolling HR rate and lag features
+- **Pitcher stats** -- season ERA/WHIP/K9, last 5 starts, vs RHB splits
+- **Bullpen quality** -- opponent team bullpen ERA/WHIP
+- **Park factors** -- overall park factor and HR-specific park factor
+- **Game context** -- home/away, pitcher handedness
+
+### Model
+
+Logistic regression with StandardScaler preprocessing and TimeSeriesSplit cross-validation -- training always uses past data to predict future games, never the reverse.
 
 ---
 
-## 🗂️ Project Structure
+## What We Tried
+
+| Version | Approach | CV Metric | Result |
+|---------|----------|-----------|--------|
+| V1 | XGBoost Regressor (TB) | MAE 1.624 | Worse than baseline, severe overfitting |
+| V2 | Poisson Regression (TB) | MAE 1.502 | Marginal improvement, no overfitting |
+| V3 | Poisson + enriched pitcher features | MAE 1.504 | Stable, well-calibrated, weak discriminating power |
+| V4 | Poisson + Statcast (TB) | MAE 1.510 | Statcast did not add signal for TB |
+| V5 | Logistic Regression (HR binary) | AUC 0.588 | First meaningful signal -- established HR as correct target |
+| V6 | Logistic + cleaner feature set | AUC 0.555 | Removed circular HR rolling features; calibration spread improved to 0.185 |
+| **V7** | **Logistic + gb_rate + days_rest** | **AUC 0.554** | **Added pitcher GB rate and Witt rest days; spread held at 0.185; current model** |
+
+Key insight: TB is too noisy -- it accumulates across multiple at bats. HR is a single binary event where barrel rate is directly predictive. Switching the target variable was more impactful than any feature engineering change.
+
+---
+
+## Operational Use
+
+The daily prediction workflow:
+
+1. Run `data_collection.py` to update game logs and pitcher stats
+2. Run `predict.py` with tonight's confirmed pitcher and park
+3. Model outputs P(HR) and equivalent American odds
+4. Compare against sportsbook line -- if model probability implies better odds than posted, edge may exist
+5. Bet or pass
+
+---
+
+## Project Structure
 
 ```
 witt_baseball_model/
-│
-├── config.py                  # Loads DB credentials from .env
-├── database_setup.py          # PostgreSQL connection via SQLAlchemy
-├── data_collection.py         # Fetches game logs from MLB Stats API → PostgreSQL
-├── model_training.py          # Trains Poisson regression model on historical data
-├── predictions.py             # Outputs TB probability distribution for a given game
-│
-├── decisions/                 # Decision log - methodology and scoping choices
-├── data/                      # Raw and processed data (local only)
-├── models/                    # Serialized trained models
-├── notebooks/                 # Exploratory analysis and validation
-└── README.md
+├── notebooks/          # Exploratory analysis and model development
+├── scripts/
+│   ├── config.py              # DB credentials via .env
+│   ├── data_collection.py     # MLB Stats API + Statcast ingestion
+│   ├── model_training.py      # Feature engineering + logistic regression
+│   └── predict.py             # Daily prediction script
+├── models/
+│   ├── witt_hr_logistic_model.pkl
+│   └── witt_hr_logistic_scaler.pkl
+├── decisions/          # Architecture decision records
+├── requirements.txt
+└── .env                # Not committed -- DATABASE_URL goes here
 ```
 
 ---
 
-## 🏗️ Architecture
+## Database Schema
 
-```
-MLB Stats API
-     │
-     ▼
-data_collection.py  ──►  PostgreSQL (Render)
-                               │
-                               ▼
-                      model_training.py  ──►  Poisson Model
-                                                    │
-                               ┌────────────────────┘
-                               │   Tonight's inputs:
-                               │   - Starting pitcher stats
-                               │   - Home/Away
-                               │   - Ballpark factor
-                               ▼
-                      predictions.py  ──►  Probability Distribution
-                                                    │
-                                                    ▼
-                                         Manual DraftKings Line Lookup
-                                         (convert odds to implied probability)
-                                                    │
-                                                    ▼
-                                              Bet or Pass
-                                                    │
-                                                    ▼
-                                         AI Post-Game Summary
-                                    (predicted vs actual + analysis)
-```
+Three tables in PostgreSQL (hosted on Render):
+
+- `witt_game_logs` -- Witt game-by-game stats with Statcast features
+- `pitcher_game_logs` -- Cumulative pitcher stats up to each game (no leakage)
+- `park_factors` -- Park factor and HR park factor by venue
+- `pitcher_season_stats` -- Lazily loaded season stats per pitcher (cached on first lookup)
 
 ---
 
-## 🗺️ Roadmap
-
-### ✅ Phase 1 - Data Pipeline
-- [x] Connect to PostgreSQL on Render
-- [x] Fetch Witt per-game historical logs via MLB Stats API
-- [x] Fetch Royals team game logs
-- [x] Upsert pipeline with conflict handling
-- [x] Add starting pitcher lookup by game
-- [x] Add static ballpark factor table
-
-### 🔄 Phase 2 - Feature Engineering
-- [ ] Build rolling window TB averages (7, 14, 30 day)
-- [ ] Join pitcher stats to Witt's game logs
-- [ ] Encode home/away, RHP/LHP, and K/9 as model inputs
-- [ ] Attach park factors per game
-
-### 📊 Phase 3 - Model Training
-- [ ] Implement Poisson regression for TB
-- [ ] Train on 2022–2024 seasons
-- [ ] Validate against held-out games
-- [ ] Assess feature importance
-
-### 🎯 Phase 4 - Predictions & Edge Detection
-- [ ] Input tonight's game context → output full probability distribution
-- [ ] Convert DraftKings American odds to implied probability
-- [ ] Flag lines where model probability exceeds implied probability by threshold
-- [ ] Output: bet recommendation with confidence level
-
-### ⚙️ Phase 5 - Automation
-- [ ] Pre-game pipeline: fetch tonight's starter → run prediction → compare DK lines
-- [ ] Logging: track predictions vs actual outcomes
-- [ ] Model retraining cadence
-
-### 🤖 Phase 6 - AI Post-Game Summary
-- [ ] After each game, automatically compare model prediction vs actual result
-- [ ] Use Claude API to generate a plain-English summary of model performance
-- [ ] Log summaries to build a track record of model accuracy over time
-- [ ] Example output: *"Model predicted 48% chance of 3+ TB. Witt went 2-for-4 with a double (2 TB). Line was fairly priced. No edge identified."*
-
-### 🔁 V2 & Beyond
-- [ ] Extend model to Stolen Bases (separate model, different feature set)
-- [ ] Apply framework to other 5-tool players (Elly De La Cruz, CJ Abrams, Julio Rodriguez)
-- [ ] Explore pitcher type interaction effects (K/9 × park factor)
-
----
-
-## 🛠️ Setup
+## Setup
 
 ### 1. Clone the repo
 ```bash
@@ -180,7 +115,6 @@ cd witt_baseball_model
 ```bash
 python -m venv venv
 source venv/bin/activate  # Mac/Linux
-venv\Scripts\activate     # Windows
 ```
 
 ### 3. Install dependencies
@@ -189,6 +123,7 @@ pip install -r requirements.txt
 ```
 
 ### 4. Configure environment variables
+
 Create a `.env` file in the root directory:
 ```
 DATABASE_URL=your_postgresql_connection_string
@@ -196,30 +131,54 @@ DATABASE_URL=your_postgresql_connection_string
 
 ### 5. Run the pipeline
 ```bash
-python database_setup.py   # Verify DB connection
-python data_collection.py  # Fetch and store game logs
-python model_training.py   # Train the model
-python predictions.py      # Generate tonight's prediction
+python scripts/data_collection.py    # Fetch and store game logs
+python scripts/model_training.py     # Train the model
+python scripts/predict.py            # Generate tonight's prediction
 ```
 
 ---
 
-## ⚠️ Limitations & Honest Caveats
+## Roadmap
 
-- **Small sample size:** Witt has 3 MLB seasons. More data = better model.
+### Phase 1 -- Core Model (done)
+- [x] Data pipeline: game logs, pitcher stats, park factors
+- [x] Statcast integration via pybaseball
+- [x] V5 logistic regression HR classifier (AUC 0.587)
+- [x] Daily prediction script (`predict.py`)
+
+### Phase 2 -- Expand and Validate (next)
+- [ ] Backtest: simulate betting on top-bin games historically, calculate ROI vs break-even
+- [ ] Add Kyle Schwarber as second player
+- [ ] Add days rest as a feature
+- [ ] Lazy pitcher stat fetching for any MLB starter
+
+### Phase 3 -- Web App
+- [ ] Player dropdown (starting with Witt and Schwarber)
+- [ ] Inputs: opposing pitcher, home/away
+- [ ] Output: P(HR), equivalent American odds, edge vs current sportsbook line
+- [ ] Instrument user flow as a second portfolio piece
+
+### Phase 4 -- AI Summary
+- [ ] Post-game AI summary via Claude API comparing model prediction to actual result
+
+---
+
+## Limitations and Honest Caveats
+
+- **Small sample size:** Witt has 3 MLB seasons. More data means a better model.
 - **Model edge is small:** Even a well-calibrated model won't win every bet. A 55% win rate on +EV bets is excellent.
-- **Line movement:** DK lines shift. This model is a pre-game signal, not a live trading tool.
-- **No guarantee:** This is a probabilistic tool, not a betting advisor. Always bet responsibly.
+- **Line movement:** Sportsbook lines shift. This model is a pre-game signal, not a live trading tool.
+- **No guarantee:** This is a probabilistic tool, not a betting advisor.
 
 ---
 
-## 📚 Data Sources
+## Data Sources
 
-- [MLB Stats API](https://statsapi.mlb.com) - Game logs, player stats, pitcher data
-- [Baseball Savant](https://baseballsavant.mlb.com) - Park adjustment data
+- [MLB Stats API](https://statsapi.mlb.com) -- Game logs, player stats, pitcher data
+- [Baseball Savant](https://baseballsavant.mlb.com) -- Park factors and Statcast data (via pybaseball)
 
 ---
 
-## 👤 About
+## About
 
-Built by a data and analytics professional as a long-term project at the intersection of **sports analytics, data engineering, and probabilistic modeling**. The goal is a rigorous, iterative framework for thinking clearly about probability and market pricing.
+Built by a data and analytics professional as a portfolio project at the intersection of sports analytics, data engineering, and probabilistic modeling. The goal is a rigorous, iterative system -- a framework for thinking clearly about probability and market pricing, not a gambling tool.
