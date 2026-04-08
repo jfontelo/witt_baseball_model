@@ -42,8 +42,9 @@ engine = create_engine(DATABASE_URL)
 # ─────────────────────────────────────────────
 
 PLAYERS = {
-    677951: {"name": "Bobby Witt Jr.",   "team_id": 118, "bats": "R"},
-    # 656941: {"name": "Kyle Schwarber",   "team_id": 143, "bats": "L"},  # uncomment when ready
+    677951: {"name": "Bobby Witt Jr.",      "team_id": 118, "bats": "R"},
+    677594: {"name": "Julio Rodriguez",     "team_id": 136, "bats": "R"},
+    682985: {"name": "Riley Greene",        "team_id": 116, "bats": "L"},
 }
 
 
