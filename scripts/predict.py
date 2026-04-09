@@ -13,10 +13,15 @@ import pandas as pd
 import numpy as np
 import joblib
 import requests
+import os
+import sys
+import warnings
 from datetime import datetime, timedelta
 from pybaseball import statcast_batter
 from data_collection import engine
 from sqlalchemy import text
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ─────────────────────────────────────────────
 # PLAYER REGISTRY
@@ -27,8 +32,8 @@ PLAYERS = {
         'name':       'Bobby Witt Jr.',
         'player_id':  677951,
         'team_id':    118,       # KC Royals
-        'model':      '../models/witt_hr_logistic_v10_model.pkl',
-        'scaler':     '../models/witt_hr_logistic_v10_scaler.pkl',
+        'model':  os.path.join(BASE_DIR, 'models', 'witt_hr_logistic_v10_model.pkl'),
+        'scaler': os.path.join(BASE_DIR, 'models', 'witt_hr_logistic_v10_scaler.pkl'),
         'baseline':   0.160,
         'features': [
             'avg_exit_velo_15',
@@ -46,8 +51,8 @@ PLAYERS = {
         'name':       'Julio Rodriguez',
         'player_id':  677594,
         'team_id':    136,       # Seattle Mariners
-        'model':      '../models/julio_hr_logistic_v1_model.pkl',
-        'scaler':     '../models/julio_hr_logistic_v1_scaler.pkl',
+        'model':  os.path.join(BASE_DIR, 'models', 'julio_hr_logistic_v2_model.pkl'),
+        'scaler': os.path.join(BASE_DIR, 'models', 'julio_hr_logistic_v2_scaler.pkl'),
         'baseline':   0.181,
         'features': [
             'avg_exit_velo_15',
@@ -64,8 +69,8 @@ PLAYERS = {
         'name':       'Riley Greene',
         'player_id':  682985,
         'team_id':    116,       # Detroit Tigers
-        'model':      '../models/greene_hr_logistic_v1_model.pkl',
-        'scaler':     '../models/greene_hr_logistic_v1_scaler.pkl',
+        'model':  os.path.join(BASE_DIR, 'models', 'greene_hr_logistic_v1_model.pkl'),
+        'scaler': os.path.join(BASE_DIR, 'models', 'greene_hr_logistic_v1_scaler.pkl'),
         'baseline':   0.145,
         'features': [
             'avg_exit_velo_15',
@@ -317,11 +322,11 @@ def predict(player_key, pitcher_name, pitcher_id, opponent_id, is_home, book_odd
 if __name__ == "__main__":
     PLAYER       = "greene"   # "witt", "julio", or "greene"
 
-    PITCHER_NAME = "Bailey Ober"       # e.g. "Tanner Bibee"
-    PITCHER_ID   = 641927     # e.g. 669456
+    PITCHER_NAME = "Mick Abel"       # e.g. "Tanner Bibee"
+    PITCHER_ID   = 690953     # e.g. 669456
     OPPONENT_ID  = 142     # e.g. 114  (Cleveland = 114)
     IS_HOME      = False    # True = home, False = away
-    BOOK_ODDS    = +356     # e.g. +350  (optional)
+    BOOK_ODDS    = +376     # e.g. +350  (optional)
 
     if not PITCHER_NAME or not PITCHER_ID or not OPPONENT_ID:
         print("❌ Fill in PITCHER_NAME, PITCHER_ID, and OPPONENT_ID before running.")
