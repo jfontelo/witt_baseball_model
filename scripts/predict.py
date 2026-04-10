@@ -62,6 +62,7 @@ PLAYERS = {
             'is_home',
             'pitcher_r',
             'era',
+            'k_per_9',
             'park_factor',
         ],
     },
@@ -80,6 +81,7 @@ PLAYERS = {
             'is_home',
             'pitcher_r',
             'era',
+            'k_per_9',
             'park_factor',
         ],
     },
@@ -320,13 +322,13 @@ def predict(player_key, pitcher_name, pitcher_id, opponent_id, is_home, book_odd
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    PLAYER       = "greene"   # "witt", "julio", or "greene"
+    PLAYER       = "julio"   # "witt", "julio", or "greene"
 
-    PITCHER_NAME = "Mick Abel"       # e.g. "Tanner Bibee"
-    PITCHER_ID   = 690953     # e.g. 669456
-    OPPONENT_ID  = 142     # e.g. 114  (Cleveland = 114)
-    IS_HOME      = False    # True = home, False = away
-    BOOK_ODDS    = +376     # e.g. +350  (optional)
+    PITCHER_NAME = "Tatsuya Imai"       # e.g. "Tanner Bibee"
+    PITCHER_ID   = 837227     # e.g. 669456
+    OPPONENT_ID  = 117     # e.g. 114  (Cleveland = 114)
+    IS_HOME      = True    # True = home, False = away
+    BOOK_ODDS    = +487     # e.g. +350  (optional)
 
     if not PITCHER_NAME or not PITCHER_ID or not OPPONENT_ID:
         print("❌ Fill in PITCHER_NAME, PITCHER_ID, and OPPONENT_ID before running.")
