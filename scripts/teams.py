@@ -4,13 +4,13 @@
 
 TEAMS = {
     108: "Angels            — Angel Stadium",
+    117: "Astros            — Daikin Park",
     141: "Blue Jays         — Rogers Centre",
     145: "White Sox         — Rate Field",
     113: "Reds              — Great American Ball Park",
     114: "Guardians         — Progressive Field",
     115: "Rockies           — Coors Field",
     116: "Tigers            — Comerica Park",
-    117: "Astros            — Daikin Park",
     118: "Royals            — Kauffman Stadium",
     110: "Orioles           — Camden Yards",
     111: "Red Sox           — Fenway Park",

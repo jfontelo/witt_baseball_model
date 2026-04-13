@@ -323,11 +323,11 @@ def predict(player_key, pitcher_name, pitcher_id, opponent_id, is_home, book_odd
 if __name__ == "__main__":
     PLAYER       = "greene"   # "witt", "julio", or "greene"
 
-    PITCHER_NAME = "Janson Junk"       # e.g. "Tanner Bibee"
-    PITCHER_ID   = 676083     # e.g. 669456
-    OPPONENT_ID  = 146     # e.g. 114  (Cleveland = 114)
+    PITCHER_NAME = "Cole Ragans"       # e.g. "Tanner Bibee"
+    PITCHER_ID   = 666142     # e.g. 669456
+    OPPONENT_ID  = 118     # e.g. 114  (Cleveland = 114)
     IS_HOME      = True    # True = home, False = away
-    BOOK_ODDS    = +525     # e.g. +350  (optional)
+    BOOK_ODDS    = +328     # e.g. +350  (optional)
 
     if not PITCHER_NAME or not PITCHER_ID or not OPPONENT_ID:
         print("❌ Fill in PITCHER_NAME, PITCHER_ID, and OPPONENT_ID before running.")

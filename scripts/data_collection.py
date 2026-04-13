@@ -45,6 +45,9 @@ PLAYERS = {
     677951: {"name": "Bobby Witt Jr.",      "team_id": 118, "bats": "R"},
     677594: {"name": "Julio Rodriguez",     "team_id": 136, "bats": "R"},
     682985: {"name": "Riley Greene",        "team_id": 116, "bats": "L"},
+    694192: {"name": "Jackson Chourio", "team_id": 158, "bats": "R"},
+    686611: {"name": "Dylan Crews",     "team_id": 120, "bats": "R"},
+
 }
 
 
