@@ -230,7 +230,13 @@ def get_statcast_features(player_id, player_name):
         'hard_hit_rate_15': round(last['hard_hit_rate_15'], 3),
         'hr_zone_rate_15':  round(last['hr_zone_rate_15'],  3),
     }
-    print(f"  Statcast (15-day rolling): {features}")
+    print(
+        f"  Statcast (15-day rolling): "
+        f"exit velo {features['avg_exit_velo_15']:.1f} mph  |  "
+        f"barrel {features['barrel_rate_15']*100:.1f}%  |  "
+        f"hard hit {features['hard_hit_rate_15']*100:.1f}%  |  "
+        f"HR zone {features['hr_zone_rate_15']*100:.1f}%"
+    )
     return features
 
 
@@ -321,13 +327,13 @@ def predict(player_key, pitcher_name, pitcher_id, opponent_id, is_home, book_odd
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    PLAYER       = "greene"   # "witt", "julio", or "greene"
+    PLAYER       = "julio"   # "witt", "julio", or "greene"
 
-    PITCHER_NAME = "Cole Ragans"       # e.g. "Tanner Bibee"
-    PITCHER_ID   = 666142     # e.g. 669456
-    OPPONENT_ID  = 118     # e.g. 114  (Cleveland = 114)
-    IS_HOME      = True    # True = home, False = away
-    BOOK_ODDS    = +328     # e.g. +350  (optional)
+    PITCHER_NAME = "Walker Buehler"       # e.g. "Tanner Bibee"
+    PITCHER_ID   = 621111     # e.g. 669456
+    OPPONENT_ID  = 135     # e.g. 114  (Cleveland = 114)
+    IS_HOME      = False    # True = home, False = away
+    BOOK_ODDS    = +545     # e.g. +350  (optional)
 
     if not PITCHER_NAME or not PITCHER_ID or not OPPONENT_ID:
         print("❌ Fill in PITCHER_NAME, PITCHER_ID, and OPPONENT_ID before running.")
